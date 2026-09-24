@@ -1,9 +1,9 @@
 <script setup lang="ts">
-// 骨架：克隆 wy-material-print/src/views/PrintPreview.vue 的工程结构（Dialog + 批量统计 +
-// 蓝牙切换 + 进度 Popup + 模拟入口 + 设备快照 + 存储协议打印）。业务字段：
-//   plan→order (PurchaseOrder), materials→details (PurchaseOrderDetail[]),
-//   preparations→selected rowIds + 份数, printCopies→Record<rowId, copies>。
-// 当前骨架只展示"未连接打印机"提示，完整实现等后端接通。
+// 克隆 wy-material-print/src/views/PrintPreview.vue 的完整工程结构（Dialog + 蓝牙 + 进度
+// Popup + 模拟入口 + 真实打印链路）。业务字段映射：plan→order, materials→details,
+// preparations→selected rows + copies。骨架阶段完成 Issue #2/#3 后接通 Issue #4：
+// createPrintOperation（拿 operationId）+ sendStoredLabels（按 rowId 编译 + 推送）
+// + savePrintResult（写回 page 状态）。
 
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import BluetoothIcon from 'tdesign-icons-vue-next/esm/components/bluetooth';
@@ -12,7 +12,8 @@ import PrintIcon from 'tdesign-icons-vue-next/esm/components/print';
 import { Button, Dialog, Loading, Popup, Toast } from 'tdesign-mobile-vue';
 import { createPrintOperation, getPrintCounts, getOperatorName, savePrintResult, type PrintResult, type PrintOperation, type PurchaseOrder, type PurchaseOrderDetail } from '../api';
 import PurchaseOrderLabel from './PurchaseOrderLabel.vue';
-import { labelSize } from '../label';
+import { compileLabel, labelSize } from '../label';
+import { storedLabel } from '../pcx';
 import { deviceSnapshot, printer, sendStoredLabels, type DeviceSnapshot } from '../printer';
 import { usePageBack } from '../pageBack';
 import BluetoothConnection from './BluetoothConnection.vue';
@@ -31,7 +32,7 @@ const readingSettings = ref(false);
 const ready = computed(() => props.simulate ? !!device.value : connected.value && !!device.value && device.value.deviceId.toUpperCase() === printer.value?.connection.device?.deviceId.toUpperCase());
 const operation = ref<PrintOperation>();
 const result = ref<PrintResult>();
-const connected = computed(() => printer.value?.connection.code === 0);
+const connected = computed(() => printer.value?.connection?.code === 0);
 const locked = computed(() => busy.value || unsaved.value);
 const emit = defineEmits<{ back: [] }>();
 const back = usePageBack('preview', () => emit('back'), () => !locked.value && !progressOpen.value);
@@ -80,22 +81,76 @@ async function print() {
   if (busy.value || !ready.value || readingSettings.value) return;
   busy.value = true; progressOpen.value = true; batchNotice.value = ''; error.value = ''; stage.value = '生成打印数据...';
   try {
+    const snapshot = device.value!;
+    labelSize(snapshot.settings);
+
+    // Step 1: create the immutable snapshot on the backend. The backend reads U8
+    // and stores header + selected detail lines so a later review sees what was
+    // actually printed even if U8 changes.
+    const created = await createPrintOperation(props.order.poId, items.value.map(item => ({ rowId: item.rowId, copies: item.copies })));
+    operation.value = created;
+    operatedAt.value = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(5, 16);
+    result.value = {
+      device: snapshot,
+      pages: created.items.flatMap(item => Array.from({ length: item.copies }, (_, index) => ({
+        rowId: item.rowId, serial: index + 1, status: 'pending' as const, error: '',
+      }))),
+    };
+    unsaved.value = true;
+
     if (props.simulate) {
-      const snapshot = device.value!;
-      labelSize(snapshot.settings);
-      const created = await createPrintOperation(props.order.poId, items.value.map(item => ({ rowId: item.rowId, copies: item.copies }))).catch(() => null);
-      if (!created) { error.value = '后端未接通，无法保存打印记录'; busy.value = false; return; }
-      operation.value = created;
-      operatedAt.value = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(5, 16);
-      result.value = { device: snapshot, pages: created.items.flatMap(item => Array.from({ length: item.copies }, (_, index) => ({ rowId: item.rowId, serial: index + 1, status: 'pending' as const, error: '' }))) };
-      unsaved.value = true;
       result.value.pages.forEach(page => { page.status = 'sent'; });
       await persist();
       finishSimulate();
       return;
     }
-    // 真实打印链路：完整流程见 wy-material-print/PrintPreview.vue；当前骨架停在 stage。
-    stage.value = '真实打印链路 TODO: 等后端接通';
+
+    // Step 2: compile TSPL/PCX labels and push to the printer. sendStoredLabels
+    // batches by printer free-bytes, writes via the K329 printer.printTspl
+    // shell bridge, and surfaces per-batch sent/error states.
+    try {
+      const compiledBatches = created.items.map(item => ({
+        rowId: item.rowId,
+        copies: item.copies,
+        commands: Array.from({ length: item.copies }, (_, index) => compileLabel(snapshot.settings, {
+          orderNo: props.order.orderNo,
+          detail: item.material as PurchaseOrderDetail,
+          serial: index + 1,
+          copies: String(item.copies),
+          printCount: item.printCount,
+          operator,
+          operatedAt: operatedAt.value,
+        })),
+      }));
+      const pictures = compiledBatches.flatMap(b => b.commands.map(command => storedLabel(command, Number(snapshot.settings.dpi))));
+      await sendStoredLabels(snapshot, pictures, (start, count, sendErr) => {
+        // Map flat picture indexes to (rowId, serial) pairs by walking through
+        // the ordered compiledBatches.
+        let cursor = 0;
+        for (const batch of compiledBatches) {
+          if (start >= cursor + batch.commands.length) { cursor += batch.commands.length; continue; }
+          if (start < cursor) break;
+          const localStart = start - cursor;
+          const localCount = Math.min(count, batch.commands.length - localStart);
+          for (let i = 0; i < localCount; i++) {
+            const page = result.value!.pages.find(p => p.rowId === batch.rowId && p.serial === localStart + i + 1);
+            if (page) {
+              page.status = sendErr ? 'error' : 'sent';
+              page.error = sendErr?.message ?? '';
+            }
+          }
+          break;
+        }
+      }, message => { stage.value = message; }, () => { batchNotice.value = '打印尚未完成，请继续等待'; });
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : '打印失败';
+      if (!result.value.pages.some(page => page.status === 'error')) {
+        const pending = result.value.pages.find(page => page.status === 'pending');
+        if (pending) { pending.status = 'error'; pending.error = error.value; }
+      }
+    }
+    await persist();
+    if (!error.value) stage.value = '打印完成，请核对出纸';
   } catch (cause) { error.value = cause instanceof Error ? cause.message : '打印失败，请重试'; }
   finally { busy.value = false; batchNotice.value = ''; }
 }
@@ -119,8 +174,6 @@ onMounted(() => {
   refreshConnection();
 });
 onUnmounted(() => { window.removeEventListener('beforeunload', leave); document.removeEventListener('visibilitychange', refreshConnection); });
-
-void sendStoredLabels; void getPrintCounts;
 </script>
 
 <template>

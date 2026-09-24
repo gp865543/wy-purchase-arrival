@@ -59,7 +59,7 @@ async function loadCounts() {
   countRequest = request;
   countError.value = '';
   try {
-    const result = await getPrintCounts(props.order.poId, request.signal).catch(() => ({ counts: {} }));
+    const result = await getPrintCounts(props.order.poId, request.signal);
     if (!request.signal.aborted) counts.value = result.counts;
   } catch (cause) {
     if (!request.signal.aborted) { counts.value = undefined; countError.value = cause instanceof Error ? cause.message : '打印次数读取失败，请重试'; }
