@@ -62,15 +62,21 @@ const allSelected = computed(() => visibleItems.value.length > 0 && visibleItems
 const unfrozenItemsCount = computed(() =>
   details.value.filter(item => !frozenRows.value.has(item.rowId)).length,
 );
-// "打印已存" 按钮的可用性：以"是否有已存 receipt"为准——与是否 frozen 无关。
-// frozenRows 仅用作 commitReceipts 时的辅助标志（已 receiptId 跳过），不决定打印。
-const savedReceiptsCount = computed(() =>
-  details.value.reduce((sum, d) => sum + (d.receipts?.length ?? 0), 0),
+
+// 选中行中"未存 / 草稿"和"已存 / 已 frozen"的分别计数。
+// "确定" 按钮: 至少 1 个未存行被选中且 validSummary 通过。
+// "打印" 按钮: 至少 1 个已存行被选中。
+const draftSelectedCount = computed(() =>
+  selected.value.filter(id => !frozenRows.value.has(id)).length,
+);
+const savedSelectedCount = computed(() =>
+  selected.value.filter(id => frozenRows.value.has(id)).length,
 );
 
 function choose(rowId: number, checked: boolean) {
   if (submitting.value) return;
-  if (frozenRows.value.has(rowId)) return; // 不能修改已 frozen 的行
+  // Both 已存 (frozen) and 未存 (draft) rows can be selected, but each row
+  // routes through a different footer action: draft → "确定", frozen → "打印".
   selected.value = checked ? [...selected.value, rowId] : selected.value.filter(id => id !== rowId);
 }
 function all(checked: boolean) {
@@ -216,8 +222,14 @@ async function loadCounts() {
 // "确定"：立刻落 receipts（不可变历史），冻结卡片，复用本地 allocations 给预览。
 // 打印与落库完全解耦——即使预览关闭 / 不打印，本次验收也保留。
 async function commitReceipts() {
-  if (!selected.value.length) return;
-  const bad = selected.value.filter(id => !validSummaryFor(id));
+  if (!draftSelectedCount.value) return;
+  // 只对"草稿"行（frozenRows 没有的行）做确定。已存行去走"打印"。
+  const draftIds = selected.value.filter(id => !frozenRows.value.has(id));
+  if (!draftIds.length) {
+    Toast({ message: '已存明细请用"打印"按钮', theme: 'warning', preventScrollThrough: false });
+    return;
+  }
+  const bad = draftIds.filter(id => !validSummaryFor(id));
   if (bad.length) {
     Toast({ message: '请确认每张卡片的分配行都已填齐、且未超额', theme: 'error', preventScrollThrough: false });
     return;
@@ -227,7 +239,7 @@ async function commitReceipts() {
     // 只提交"新"行（无 receiptId）。已解锁的行由于前端 receiptId 已删，
     // 重新编辑后会作为新行提交；后端先 DELETE 再 POST 等价。
     const flat: Allocation[] = [];
-    for (const rowId of selected.value) {
+    for (const rowId of draftIds) {
       for (const row of allocations[rowId] ?? []) {
         if (row.isResidual) continue;
         if (row.receiptId) continue; // 已 saved，跳过
@@ -247,7 +259,7 @@ async function commitReceipts() {
     for (const r of result.receipts) {
       idByKey.set(`${r.rowId}|${r.planNumber}|${r.quantity}`, r.id);
     }
-    for (const rowId of selected.value) {
+    for (const rowId of draftIds) {
       const list = allocations[rowId] ?? [];
       for (const row of list) {
         if (row.isResidual) continue;
@@ -259,7 +271,9 @@ async function commitReceipts() {
       frozenRows.value.add(rowId);
     }
     frozenRows.value = new Set(frozenRows.value);
-    // 选中行清空（已冻结），并把详情里的 receivedQuantity 加上本次提交的总额（避免再次 GET）。
+    // 选中行清空（草稿冻结后取消勾选；已存行若有勾选则保留，给"打印"按钮继续用）
+    selected.value = selected.value.filter(id => frozenRows.value.has(id));
+    // 把详情里的 receivedQuantity 加上本次提交的总额（避免再次 GET）。
     const submittedByRow = new Map<number, number>();
     for (const a of flat) submittedByRow.set(a.rowId, (submittedByRow.get(a.rowId) ?? 0) + a.quantity);
     for (const d of details.value) {
@@ -326,9 +340,12 @@ function openPreview(simulate = false) {
 // 这样即便用户编辑 UI 又关掉，再点"打印"也能正确打印已落库的事实。）
 // 每条 allocation 带上 receiptId，label.ts 用 receiptId 生成二维码 —— 同 receipt
 // 反复打印 QR 内容稳定（始终指向同 receipt.id）。
+// 仅打印"被勾选"的明细行的 receipts；勾选是 PrintPreview 的过滤条件。
 function buildFlatAllocations(): Allocation[] {
+  if (!savedSelectedCount.value) return [];
   const flat: Allocation[] = [];
   for (const d of details.value) {
+    if (!selected.value.includes(d.rowId)) continue;
     if (!d.receipts?.length) continue;
     for (const r of d.receipts) {
       flat.push({ rowId: d.rowId, planNumber: r.planNumber, quantity: r.quantity, receiptId: r.id });
@@ -408,7 +425,7 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
         <Empty v-if="!visibleItems.length" description="暂无匹配物料" />
         <article v-for="item in details" :hidden="!visibleItems.includes(item)" :key="item.rowId" class="detail-card" :class="{ picked: selected.includes(item.rowId), printed: (counts?.[item.rowId] ?? 0) > 0, over: !frozenRows.has(item.rowId) && overAllocated(item.rowId), frozen: frozenRows.has(item.rowId) }">
           <div class="detail-heading">
-            <Checkbox :checked="selected.includes(item.rowId)" :disabled="submitting || frozenRows.has(item.rowId)" @change="checked => choose(item.rowId, checked)">{{ item.inventoryName }}</Checkbox>
+            <Checkbox :checked="selected.includes(item.rowId)" :disabled="submitting" @change="checked => choose(item.rowId, checked)">{{ item.inventoryName }}</Checkbox>
             <Tag v-if="frozenRows.has(item.rowId)" variant="light" theme="success">已完成</Tag>
             <Tag v-else-if="counts" variant="light">{{ counts[item.rowId] ? `已打印${counts[item.rowId]}次` : '未打印' }}</Tag>
           </div>
@@ -507,16 +524,16 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
       >
         所选明细中存在分配数量超过订单数量的行，请修改后再确定
       </p>
-      <component :is="devTools" v-if="devTools" :disabled="!selected.length || selected.some(id => !validSummaryFor(id))" @simulate="openPreview(true)" />
+      <component :is="devTools" v-if="devTools" :disabled="!savedSelectedCount || submitting" @simulate="openPreview(true)" />
       <div class="footer-actions">
         <Button theme="light" :disabled="submitting || !unfrozenItemsCount" :aria-pressed="allSelected" @click="all(!allSelected)">
           {{ allSelected ? '取消全选' : '全选' }}
         </Button>
-        <Button theme="primary" :loading="submitting" :disabled="!selected.length || selected.some(id => !validSummaryFor(id))" @click="commitReceipts">
+        <Button theme="primary" :loading="submitting" :disabled="!draftSelectedCount || selected.filter(id => !frozenRows.has(id)).some(id => !validSummaryFor(id))" @click="commitReceipts">
           确定
         </Button>
-        <Button theme="light" :disabled="!savedReceiptsCount || submitting" @click="openPreview(false)">
-          打印已存
+        <Button theme="light" :disabled="!savedSelectedCount || submitting" @click="openPreview(false)">
+          打印
         </Button>
       </div>
     </footer>
