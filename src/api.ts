@@ -127,8 +127,18 @@ export function getSummary(signal: AbortSignal): Promise<{ reviewedCount: number
 
 // ----- 打印 -----
 
-export function createPrintOperation(poId: number, items: { rowId: number; copies: number }[]): Promise<PrintOperation> {
-  return write('/purchase-arrival/print-operations', 'POST', { poId, items });
+export type Allocation = {
+  rowId: number;
+  planNumber: string;
+  quantity: number;
+};
+
+export function createPrintOperation(
+  poId: number,
+  items: { rowId: number; copies: number }[],
+  allocations: Allocation[] = [],
+): Promise<PrintOperation> {
+  return write('/purchase-arrival/print-operations', 'POST', { poId, items, allocations });
 }
 
 export function savePrintResult(operationId: string, result: PrintResult): Promise<PrintOperation> {

@@ -17,6 +17,7 @@ export type Label = {
   serial: number;
   copies: string;
   printCount?: number;
+  planNumber?: string;
   paper?: PrinterSettings;
   operator?: string;
   operatedAt?: string;
@@ -30,23 +31,25 @@ export function labelSize(paper?: PrinterSettings) {
 }
 
 export function labelLines(label: Label) {
-  const { orderNo, detail, serial, copies, printCount } = label;
+  const { orderNo, detail, serial, copies, printCount, planNumber } = label;
   const dimensions = labelSize(label.paper);
   const width = dimensions.width * 5;
   const height = dimensions.height * 5;
   // 标签字段布局：
   //   1. 订单号（左侧加粗）
-  //   2. 到货日期（右侧加粗）
-  //   3. 物料名称
-  //   4. 规格
-  //   5. 订单数量（单位）
+  //   2. 生产计划号（右侧加粗，仅手动分配时显示）
+  //   3. 到货日期（移到物料名称下方一行）
+  //   4. 物料名称
+  //   5. 规格
+  //   6. 订单数量（单位）
   //   底部：打印次数 / 张序 / 操作人+时间
+  const planText = planNumber ? `计划号 ${planNumber}` : '';
   const arriveText = detail.arriveDate ? `到货日期 ${detail.arriveDate}` : '';
   const original = [
     { x: 14, y: 24, size: 16, anchor: 'start', text: orderNo },
-    { x: width - 14, y: 24, size: 16, anchor: 'end', text: arriveText },
+    { x: width - 14, y: 24, size: 16, anchor: 'end', text: planText },
     { x: 14, y: 72, size: 16, anchor: 'start', text: detail.inventoryName },
-    { x: 14, y: 104, size: 16, anchor: 'start', text: detail.spec },
+    { x: 14, y: 104, size: 16, anchor: 'start', text: arriveText },
     { x: 14, y: 136, size: 16, anchor: 'start', text: `订单数量 ${detail.quantity}` },
     { x: 14, y: height - 15, size: 10, anchor: 'start', text: `打印次数 ${printCount ?? '待确认'}` },
     { x: width / 2, y: height - 15, size: 10, anchor: 'middle', text: `${serial} / ${copies}` },

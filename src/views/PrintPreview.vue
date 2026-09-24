@@ -10,7 +10,7 @@ import BluetoothIcon from 'tdesign-icons-vue-next/esm/components/bluetooth';
 import CloseIcon from 'tdesign-icons-vue-next/esm/components/close';
 import PrintIcon from 'tdesign-icons-vue-next/esm/components/print';
 import { Button, Dialog, Loading, Popup, Toast } from 'tdesign-mobile-vue';
-import { createPrintOperation, getPrintCounts, getOperatorName, savePrintResult, type PrintResult, type PrintOperation, type PurchaseOrder, type PurchaseOrderDetail } from '../api';
+import { createPrintOperation, getPrintCounts, getOperatorName, savePrintResult, type Allocation, type PrintResult, type PrintOperation, type PurchaseOrder, type PurchaseOrderDetail } from '../api';
 import PurchaseOrderLabel from './PurchaseOrderLabel.vue';
 import { compileLabel, labelSize } from '../label';
 import { storedLabel } from '../pcx';
@@ -18,7 +18,7 @@ import { deviceSnapshot, printer, sendStoredLabels, type DeviceSnapshot } from '
 import { usePageBack } from '../pageBack';
 import BluetoothConnection from './BluetoothConnection.vue';
 
-const props = defineProps<{ order: PurchaseOrder; details: PurchaseOrderDetail[]; printCopies: Record<number, string>; counts?: Record<number, number>; simulate?: boolean }>();
+const props = defineProps<{ order: PurchaseOrder; details: PurchaseOrderDetail[]; printCopies: Record<number, string>; counts?: Record<number, number>; allocations?: Allocation[]; simulate?: boolean }>();
 const operator = getOperatorName();
 const SIMULATED_DEVICE: DeviceSnapshot = { deviceId: 'SIMULATED', settings: { language: 'TSPL', paperWidth: 76, paperHeight: 59, mediaType: 'gap', gap: 2, blackMarkHeight: 0, blackMarkOffset: 0, x: 0, y: 0, direction: 0, dpi: 300 } };
 const operatedAt = ref(new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(5, 16));
@@ -38,12 +38,23 @@ const emit = defineEmits<{ back: [] }>();
 const back = usePageBack('preview', () => emit('back'), () => !locked.value && !progressOpen.value);
 
 // selected rows + copies from printCopies; details 全量通过 props 进来。
+// `allocations` 按 rowId 索引；planNumber 用循环方式串到 pages（每张标签带一个计划号）。
+const allocationsByRow = computed(() => {
+  const out = new Map<number, Allocation[]>();
+  for (const a of props.allocations ?? []) {
+    const list = out.get(a.rowId);
+    if (list) list.push(a);
+    else out.set(a.rowId, [a]);
+  }
+  return out;
+});
 const items = computed(() => Object.entries(props.printCopies)
   .filter(([_, copies]) => /^[1-9]\d*$/.test(copies) && Number(copies) <= 10000)
   .map(([rowId, copies]) => ({
     rowId: Number(rowId),
     detail: props.details.find(d => d.rowId === Number(rowId))!,
     copies: Number(copies),
+    allocations: allocationsByRow.value.get(Number(rowId)) ?? [],
   }))
   .filter(item => item.detail));
 const total = computed(() => items.value.reduce((sum, item) => sum + item.copies, 0));
@@ -51,9 +62,17 @@ const limit = ref(20);
 const pages = computed(() => {
   const result = [];
   for (const row of items.value) {
+    // If allocations exist, the i-th copy is bound to the i-th allocation's
+    // plan number (caller is responsible for matching copies <= allocations.length
+    // or padding with the last allocation; here we fall back to "no plan" when
+    // there's a surplus).
+    const planBySerial = row.allocations.length
+      ? row.allocations.map((a, i) => a.planNumber)
+      : [];
     for (let serial = 1; serial <= row.copies; serial++) {
       if (result.length >= limit.value) return result;
-      result.push({ ...row, serial });
+      const planNumber = planBySerial[serial - 1] ?? planBySerial[planBySerial.length - 1] ?? '';
+      result.push({ ...row, serial, planNumber });
     }
   }
   return result;
@@ -87,7 +106,11 @@ async function print() {
     // Step 1: create the immutable snapshot on the backend. The backend reads U8
     // and stores header + selected detail lines so a later review sees what was
     // actually printed even if U8 changes.
-    const created = await createPrintOperation(props.order.poId, items.value.map(item => ({ rowId: item.rowId, copies: item.copies })));
+    const created = await createPrintOperation(
+      props.order.poId,
+      items.value.map(item => ({ rowId: item.rowId, copies: item.copies })),
+      props.allocations ?? [],
+    );
     operation.value = created;
     operatedAt.value = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(5, 16);
     result.value = {
@@ -195,7 +218,7 @@ onUnmounted(() => { window.removeEventListener('beforeunload', leave); document.
     <p v-else-if="!device && !error">请连接打印机以预览标签</p>
     <div v-if="device" class="label-pages" @scroll.passive="loadMore">
       <figure v-for="page in pages" :key="`${page.rowId}-${page.serial}`" class="paper-panel">
-        <PurchaseOrderLabel :paper="device.settings" :operator="operator" :operated-at="operatedAt" :order-no="order.orderNo" :detail="page.detail" :copies="String(page.copies)" :serial="page.serial" :print-count="counts ? (counts[page.rowId] ?? 0) + 1 : undefined" />
+        <PurchaseOrderLabel :paper="device.settings" :operator="operator" :operated-at="operatedAt" :order-no="order.orderNo" :detail="page.detail" :copies="String(page.copies)" :serial="page.serial" :plan-number="page.planNumber" :print-count="counts ? (counts[page.rowId] ?? 0) + 1 : undefined" />
       </figure>
     </div>
   </Dialog>

@@ -17,6 +17,7 @@ type Props = {
   copies: string;
   serial: number;
   printCount?: number;
+  planNumber?: string;
 };
 
 const props = defineProps<Props>();
@@ -28,6 +29,7 @@ const layout = computed(() => {
     serial: props.serial,
     copies: props.copies,
     printCount: props.printCount,
+    planNumber: props.planNumber,
     paper: props.paper,
     operator: props.operator,
     operatedAt: props.operatedAt,

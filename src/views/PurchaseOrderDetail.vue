@@ -1,11 +1,17 @@
 <script setup lang="ts">
-// 骨架：克隆 wy-material-print/src/views/MaterialList.vue 的工程结构（顶部 Heading / 搜索 /
-// 滚动内容 / 选中 / 全选 / 底部打印预览入口 / 返回栈 / 安全区）。业务字段：PO 明细物料。
-// 当前骨架仅展示空态，完整实现等后端接通后补：
+// 工程结构克隆 wy-material-print/src/views/MaterialList.vue（顶部 Heading / 搜索 / 滚动内容 / 选中 /
+// 全选 / 底部打印预览入口 / 返回栈 / 安全区）。业务字段：PO 明细物料 + 手动拆分配到生产计划号。
+//
+// 业务流：
+//   1. 卡片显示物料 + 订单数量 + 打印份数 + 分配区（手动输入 "生产计划号 + 数量" 任意行）
+//   2. 底部"剩余（自动计算）"实时显示；超过订单数量给出红色警告、阻止"确定"
+//   3. 点击"确定" → 把分配列表随 print-operation 一起落到快照（后端持久化）
+//   4. PrintPreview 展示标签，标签内容包含计划号
 
-import { computed, onMounted, onUnmounted, ref } from 'vue';
-import { Button, Checkbox, Empty, Loading, Navbar, Search, Tag } from 'tdesign-mobile-vue';
-import { getPurchaseOrder, getPrintCounts, type PurchaseOrder, type PurchaseOrderDetail } from '../api';
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
+import { Alert, Button, Checkbox, Empty, Input, Loading, Navbar, Search, Tag, Toast } from 'tdesign-mobile-vue';
+import CloseIcon from 'tdesign-icons-vue-next/esm/components/close';
+import { getPurchaseOrder, getPrintCounts, type Allocation, type PurchaseOrder, type PurchaseOrderDetail } from '../api';
 import PrintPreview from './PrintPreview.vue';
 import PoArrivalDevTools from './PoArrivalDevTools.vue';
 import { usePageBack } from '../pageBack';
@@ -26,6 +32,11 @@ const keyword = ref('');
 const loading = ref(true);
 const error = ref('');
 const submitting = ref(false);
+
+// Per-row list of {planNumber, quantity}. Each row starts with one empty input.
+// Edited in place; the "remaining" computed derives from this map.
+type AllocDraft = { planNumber: string; quantity: string };
+const allocations = reactive<Record<number, AllocDraft[]>>({});
 
 let controller: AbortController | undefined;
 let countRequest: AbortController | undefined;
@@ -53,6 +64,55 @@ function toggleCopies(rowId: number, value: string) {
   printCopies.value[rowId] = value;
 }
 
+// ----- allocation editing -----
+
+function ensureAllocRow(rowId: number) {
+  if (!allocations[rowId]) allocations[rowId] = [{ planNumber: '', quantity: '' }];
+}
+
+function addAllocRow(rowId: number) {
+  ensureAllocRow(rowId);
+  allocations[rowId].push({ planNumber: '', quantity: '' });
+}
+
+function removeAllocRow(rowId: number, index: number) {
+  const list = allocations[rowId];
+  list.splice(index, 1);
+  if (list.length === 0) list.push({ planNumber: '', quantity: '' });
+}
+
+function parsePositiveInt(value: string): number {
+  if (!/^\d+$/.test(value)) return 0;
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
+}
+
+const orderQtyOf = (rowId: number) => {
+  const d = details.value.find(x => x.rowId === rowId);
+  if (!d) return 0;
+  const q = Number(d.quantity);
+  return Number.isFinite(q) && q > 0 ? Math.floor(q) : 0;
+};
+
+const allocatedOf = (rowId: number) => {
+  ensureAllocRow(rowId);
+  return allocations[rowId].reduce((sum, row) => sum + parsePositiveInt(row.quantity), 0);
+};
+
+const remainingOf = (rowId: number) => orderQtyOf(rowId) - allocatedOf(rowId);
+
+const allocSummaryOf = (rowId: number) => {
+  const list = allocations[rowId] ?? [];
+  return list.filter(row => row.planNumber.trim() !== '' && parsePositiveInt(row.quantity) > 0)
+    .map<Allocation>(row => ({
+      rowId,
+      planNumber: row.planNumber.trim(),
+      quantity: parsePositiveInt(row.quantity),
+    }));
+};
+
+const overAllocated = (rowId: number) => remainingOf(rowId) < 0;
+
 async function loadCounts() {
   countRequest?.abort();
   const request = new AbortController();
@@ -66,8 +126,25 @@ async function loadCounts() {
   }
 }
 
+function buildFlatAllocations(): Allocation[] {
+  const flat: Allocation[] = [];
+  for (const item of details.value) {
+    if (!selected.value.includes(item.rowId)) continue;
+    const summary = allocSummaryOf(item.rowId);
+    if (summary.length) flat.push(...summary);
+  }
+  return flat;
+}
+
 function preparePreview(simulate = false) {
   if (!selected.value.length) return;
+  // Block on negative remaining (data-entry error) but allow positive
+  // remaining (partial split is normal for staged receiving).
+  const bad = selected.value.filter(id => overAllocated(id));
+  if (bad.length) {
+    Toast({ message: '明细分配数量超过订单数量，请修改', theme: 'error', preventScrollThrough: false });
+    return;
+  }
   simulatePreview.value = simulate;
   previewOpen.value = true;
 }
@@ -91,11 +168,15 @@ async function load() {
   error.value = '';
   details.value = [];
   selected.value = [];
+  for (const k of Object.keys(allocations)) delete allocations[Number(k)];
   try {
     const result = await getPurchaseOrder(props.order.poId, request.signal);
     if (!request.signal.aborted) {
       details.value = result.details;
-      details.value.forEach(item => { printCopies.value[item.rowId] ??= '1'; });
+      details.value.forEach(item => {
+        printCopies.value[item.rowId] ??= '1';
+        ensureAllocRow(item.rowId);
+      });
     }
   } catch (cause) {
     if (!request.signal.aborted) error.value = cause instanceof Error ? cause.message : '订单明细读取失败，请重试';
@@ -109,7 +190,7 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
 </script>
 
 <template>
-  <PrintPreview v-if="previewOpen" :order="order" :details="details" :counts="counts" :print-copies="printCopies" :simulate="simulatePreview" @back="closePreview" />
+  <PrintPreview v-if="previewOpen" :order="order" :details="details" :counts="counts" :print-copies="printCopies" :allocations="buildFlatAllocations()" :simulate="simulatePreview" @back="closePreview" />
   <div class="detail-screen">
     <Navbar title="到货明细" :fixed="false" left-arrow @left-click="back" />
     <header class="order-heading">
@@ -137,7 +218,7 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
           <Button size="small" @click="loadCounts">重试读取次数</Button>
         </div>
         <Empty v-if="!visibleItems.length" description="暂无匹配物料" />
-        <article v-for="item in details" :hidden="!visibleItems.includes(item)" :key="item.rowId" class="detail-card" :class="{ picked: selected.includes(item.rowId), printed: (counts?.[item.rowId] ?? 0) > 0 }">
+        <article v-for="item in details" :hidden="!visibleItems.includes(item)" :key="item.rowId" class="detail-card" :class="{ picked: selected.includes(item.rowId), printed: (counts?.[item.rowId] ?? 0) > 0, over: overAllocated(item.rowId) }">
           <div class="detail-heading">
             <Checkbox :checked="selected.includes(item.rowId)" :disabled="submitting" @change="checked => choose(item.rowId, checked)">{{ item.inventoryName }}</Checkbox>
             <Tag v-if="counts" variant="light">{{ counts[item.rowId] ? `已打印${counts[item.rowId]}次` : '未打印' }}</Tag>
@@ -155,17 +236,67 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
               @input="toggleCopies(item.rowId, ($event.target as HTMLInputElement).value)"
             />
           </label>
+
+          <div v-if="selected.includes(item.rowId)" class="alloc-block" :aria-label="`${item.inventoryName}生产计划号分配`">
+            <p class="alloc-heading">分配到生产计划号</p>
+            <div v-for="(row, idx) in allocations[item.rowId]" :key="idx" class="alloc-row">
+              <Input
+                v-model="row.planNumber"
+                placeholder="计划号"
+                :disabled="submitting"
+                aria-label="生产计划号"
+                class="alloc-plan"
+              />
+              <Input
+                v-model="row.quantity"
+                placeholder="数量"
+                type="number"
+                :disabled="submitting"
+                aria-label="分配数量"
+                class="alloc-qty"
+              />
+              <Button
+                theme="light"
+                size="small"
+                variant="outline"
+                :disabled="submitting"
+                aria-label="删除分配行"
+                @click="removeAllocRow(item.rowId, idx)"
+              >
+                <template #icon><CloseIcon aria-hidden="true" /></template>
+              </Button>
+            </div>
+            <Button
+              theme="light"
+              size="small"
+              variant="outline"
+              block
+              :disabled="submitting"
+              @click="addAllocRow(item.rowId)"
+            >
+              + 添加分配行
+            </Button>
+            <p class="alloc-remaining" :class="{ negative: overAllocated(item.rowId) }">
+              剩余（自动计算）<strong>{{ remainingOf(item.rowId) }}</strong>
+            </p>
+          </div>
         </article>
       </template>
     </main>
     <footer v-if="!loading && !error && details.length" class="detail-footer">
-      <component :is="devTools" v-if="devTools" :disabled="!selected.length" @simulate="preparePreview(true)" />
+      <Alert
+        v-if="selected.some(id => overAllocated(id))"
+        theme="error"
+        message="所选明细中存在分配数量超过订单数量的行，请修改后再确定"
+        :style="{ marginBottom: 'var(--td-spacer-2)' }"
+      />
+      <component :is="devTools" v-if="devTools" :disabled="!selected.length || selected.some(id => overAllocated(id))" @simulate="preparePreview(true)" />
       <div class="footer-actions">
         <Button theme="light" :disabled="submitting" :aria-pressed="allSelected" @click="all(!allSelected)">
           {{ allSelected ? '取消全选' : '全选' }}
         </Button>
-        <Button theme="primary" :loading="submitting" :disabled="!selected.length" @click="preparePreview(false)">
-          打印预览
+        <Button theme="primary" :loading="submitting" :disabled="!selected.length || selected.some(id => overAllocated(id))" @click="preparePreview(false)">
+          确定
         </Button>
       </div>
     </footer>
@@ -254,6 +385,41 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
   border-radius: var(--td-radius-default);
   text-align: right;
   font: inherit;
+}
+.alloc-block {
+  margin-top: var(--td-spacer-2);
+  padding-top: var(--td-spacer-2);
+  border-top: 1px dashed var(--td-component-border);
+}
+.alloc-heading {
+  margin: 0 0 var(--td-spacer-1);
+  color: var(--td-text-color-secondary);
+  font-size: var(--td-font-size-body-small);
+}
+.alloc-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px 36px;
+  gap: var(--td-spacer-1);
+  align-items: center;
+  margin-bottom: var(--td-spacer-1);
+}
+.alloc-row :deep(.t-input) {
+  min-width: 0;
+}
+.alloc-remaining {
+  margin: var(--td-spacer-2) 0 0;
+  text-align: right;
+  font-size: var(--td-font-size-body-medium);
+  color: var(--td-text-color-secondary);
+}
+.alloc-remaining.negative {
+  color: var(--td-error-color);
+}
+.alloc-remaining strong {
+  margin-left: var(--td-spacer-1);
+}
+.detail-card.over {
+  border-color: var(--td-error-color);
 }
 .state {
   display: grid;
