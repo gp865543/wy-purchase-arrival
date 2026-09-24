@@ -9,7 +9,7 @@
 //   4. PrintPreview 展示标签，标签内容包含计划号
 
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
-import { Alert, Button, Checkbox, Empty, Input, Loading, Navbar, Search, Tag, Toast } from 'tdesign-mobile-vue';
+import { Button, Checkbox, Empty, Input, Loading, Message, Navbar, Search, Tag, Toast } from 'tdesign-mobile-vue';
 import CloseIcon from 'tdesign-icons-vue-next/esm/components/close';
 import { getPurchaseOrder, getPrintCounts, type Allocation, type PurchaseOrder, type PurchaseOrderDetail } from '../api';
 import PrintPreview from './PrintPreview.vue';
@@ -284,12 +284,13 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
       </template>
     </main>
     <footer v-if="!loading && !error && details.length" class="detail-footer">
-      <Alert
+      <p
         v-if="selected.some(id => overAllocated(id))"
-        theme="error"
-        message="所选明细中存在分配数量超过订单数量的行，请修改后再确定"
-        :style="{ marginBottom: 'var(--td-spacer-2)' }"
-      />
+        class="over-banner"
+        role="alert"
+      >
+        所选明细中存在分配数量超过订单数量的行，请修改后再确定
+      </p>
       <component :is="devTools" v-if="devTools" :disabled="!selected.length || selected.some(id => overAllocated(id))" @simulate="preparePreview(true)" />
       <div class="footer-actions">
         <Button theme="light" :disabled="submitting" :aria-pressed="allSelected" @click="all(!allSelected)">
@@ -420,6 +421,15 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
 }
 .detail-card.over {
   border-color: var(--td-error-color);
+}
+.over-banner {
+  margin: 0 0 var(--td-spacer-2);
+  padding: var(--td-spacer-2);
+  color: var(--td-error-color);
+  background: var(--td-error-color-1);
+  border-radius: var(--td-radius-default);
+  font-size: var(--td-font-size-body-small);
+  text-align: center;
 }
 .state {
   display: grid;
