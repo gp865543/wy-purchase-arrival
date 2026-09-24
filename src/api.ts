@@ -165,7 +165,20 @@ export function createReceipts(
   return write('/purchase-arrival/receipts', 'POST', { poId, allocations });
 }
 
-// 解锁单条 receipt：物理删除，后端给前端留了空位让"确定"重新提交修正后的版本。
+// 改一条已存的 receipt（计划号 / 数量）。后端在 transaction 里校验总额 + 持久化。
+export function updateReceipt(
+  receiptId: string,
+  poId: number,
+  rowId: number,
+  planNumber: string,
+  quantity: number,
+): Promise<Receipt> {
+  return write(`/purchase-arrival/receipts/${receiptId}`, 'PUT', {
+    poId, rowId, planNumber, quantity,
+  });
+}
+
+// 仍保留 deleteReceipt 给"删除单条"按钮（如要还原成简单版）。
 export function deleteReceipt(receiptId: string): Promise<{ deleted: string }> {
   return write(`/purchase-arrival/receipts/${receiptId}`, 'DELETE', {});
 }

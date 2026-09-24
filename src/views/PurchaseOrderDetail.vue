@@ -14,7 +14,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { Button, Checkbox, Empty, Input, Loading, Message, Navbar, Search, Tag, Toast } from 'tdesign-mobile-vue';
 import CloseIcon from 'tdesign-icons-vue-next/esm/components/close';
-import { getPurchaseOrder, getPrintCounts, createReceipts, deleteReceipt, type Allocation, type PurchaseOrder, type PurchaseOrderDetailRow, type Receipt } from '../api';
+import { getPurchaseOrder, getPrintCounts, createReceipts, updateReceipt, type Allocation, type PurchaseOrder, type PurchaseOrderDetailRow, type Receipt } from '../api';
 import PrintPreview from './PrintPreview.vue';
 import PoArrivalDevTools from './PoArrivalDevTools.vue';
 import { usePageBack } from '../pageBack';
@@ -41,6 +41,10 @@ const submitting = ref(false);
 type AllocDraft = { id: string; planNumber: string; quantity: string; frozen: boolean; isResidual: boolean; receiptId?: string };
 const allocations = reactive<Record<number, AllocDraft[]>>({});
 const frozenRows = ref<Set<number>>(new Set());
+
+// 编辑 receipts 时的本地草稿：保存未保存的 planNumber/quantity 直至 blur/enter。
+// receiptId -> { planNumber, quantity }。
+const receiptDrafts = reactive<Record<string, { planNumber: string; quantity: string }>>({});
 
 let controller: AbortController | undefined;
 let countRequest: AbortController | undefined;
@@ -275,50 +279,35 @@ async function commitReceipts() {
   }
 }
 
-// 解锁：物理删除 receipt（后端硬删），把 planNumber + quantity 回填到本地
-// allocations[rowId] 编辑区，移除 rowId 出于 frozenRows。操作员修改完再"确定"即可。
-async function unlockReceipt(rowId: number, receipt: Receipt) {
+// 修改一条已存的 receipt：in-place PUT（后端 transaction 校验 + 持久化）。
+// 不需要"解锁"动作——输入框本身即可编辑，blur 时直接落库。
+async function saveReceiptEdit(rowId: number, receipt: Receipt, planNumber: string, quantity: number) {
+  // Skip when the value didn't actually change (Enter on same value, etc.).
+  if (planNumber === receipt.planNumber && quantity === receipt.quantity) return;
+  if (quantity < 1) {
+    Toast({ message: '数量必须大于 0', theme: 'error', preventScrollThrough: false });
+    return;
+  }
   if (submitting.value) return;
   submitting.value = true;
   try {
-    await deleteReceipt(receipt.id);
+    const updated = await updateReceipt(receipt.id, props.order.poId, rowId, planNumber, quantity);
+    // Replace in details[].receipts and update receivedQuantity diff.
+    const d = details.value.find(x => x.rowId === rowId);
+    if (d?.receipts) {
+      const idx = d.receipts.findIndex(r => r.id === receipt.id);
+      if (idx >= 0) {
+        const oldQty = d.receipts[idx].quantity;
+        d.receipts[idx] = updated;
+        d.receivedQuantity = Math.max(0, (d.receivedQuantity ?? 0) - oldQty + quantity);
+      }
+    }
+    Toast({ message: '已保存修改', theme: 'success', duration: 1200, preventScrollThrough: false });
   } catch (cause) {
-    Toast({ message: cause instanceof Error ? cause.message : '解锁失败', theme: 'error', preventScrollThrough: false });
-    submitting.value = false;
-    return;
+    Toast({ message: cause instanceof Error ? cause.message : '保存失败', theme: 'error', preventScrollThrough: false });
   } finally {
     submitting.value = false;
   }
-  // 从后端 receipts 同步移除
-  const d = details.value.find(x => x.rowId === rowId);
-  if (d?.receipts) {
-    d.receipts = d.receipts.filter(r => r.id !== receipt.id);
-    d.receivedQuantity = Math.max(0, (d.receivedQuantity ?? 0) - receipt.quantity);
-  }
-  // 重新装入该 rowId 的草稿（含这一条 receipt 的当前内容）
-  const existing = allocations[rowId] ?? [];
-  // 过滤掉残余的 "剩余" 自动行 — 草稿重新算
-  const reals = existing.filter(r => !r.isResidual);
-  // 该 rowId 是否已经有同 planNumber 的草稿？有就跳过 receipt 内容（避免重复行）
-  const existingKeys = new Set(reals.map(r => `${r.planNumber.trim()}|${parsePositiveInt(r.quantity)}`));
-  if (!existingKeys.has(`${receipt.planNumber}|${receipt.quantity}`)) {
-    reals.push({
-      id: newLocalId(),
-      planNumber: receipt.planNumber,
-      quantity: String(receipt.quantity),
-      frozen: false,
-      isResidual: false,
-    });
-  }
-  allocations[rowId] = reals;
-  // unfreeze → 用户可以编辑
-  const next = new Set(frozenRows.value);
-  next.delete(rowId);
-  frozenRows.value = next;
-  // 把上面 push 进去的 receipt 内容回填草稿时把 receiptId 也带回（让 commit 知道这是修改过的同一行）
-  // 其实：解锁后 receiptId 已无效，下次"确定"会作为新行提交 + 后端硬删后重新加 — 等价
-  appendResidualIfNeeded(rowId);
-  Toast({ message: '已解锁，可修改后重新确定', theme: 'success', duration: 1500, preventScrollThrough: false });
 }
 
 // 仅用于打印预览：从 frozen 行的本地分配构建预览 allocations。
@@ -427,22 +416,29 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
           <div class="alloc-block" :aria-label="`${item.inventoryName}生产计划号分配`">
             <p class="alloc-heading">分配到生产计划号</p>
 
-            <!-- 已验收历史行（来自后端 receipts）— 只读 + 可解锁 -->
+            <!-- 已验收历史行（来自后端 receipts）— 可在位编辑 + blur 自动保存 -->
             <template v-if="(item.receipts ?? []).length">
-              <div v-for="r in item.receipts" :key="r.id" class="alloc-row frozen historical">
-                <Input :model-value="r.planNumber || '剩余'" disabled aria-label="生产计划号（已保存）" class="alloc-plan" />
-                <Input :model-value="String(r.quantity)" disabled aria-label="数量（已保存）" class="alloc-qty" />
+              <div v-for="r in item.receipts" :key="r.id" class="alloc-row historical">
+                <Input
+                  :model-value="receiptDrafts[r.id]?.planNumber ?? r.planNumber"
+                  @update:model-value="(val: string | number) => { receiptDrafts[r.id] = { ...(receiptDrafts[r.id] ?? { planNumber: r.planNumber, quantity: String(r.quantity) }), planNumber: String(val) }; }"
+                  @blur="saveReceiptEdit(item.rowId, r, receiptDrafts[r.id]?.planNumber ?? r.planNumber, parsePositiveInt(receiptDrafts[r.id]?.quantity ?? String(r.quantity)))"
+                  @enter="saveReceiptEdit(item.rowId, r, receiptDrafts[r.id]?.planNumber ?? r.planNumber, parsePositiveInt(receiptDrafts[r.id]?.quantity ?? String(r.quantity)))"
+                  placeholder="计划号"
+                  aria-label="生产计划号（已保存）"
+                  class="alloc-plan"
+                />
+                <Input
+                  :model-value="receiptDrafts[r.id]?.quantity ?? String(r.quantity)"
+                  @update:model-value="(val: string | number) => { receiptDrafts[r.id] = { ...(receiptDrafts[r.id] ?? { planNumber: r.planNumber, quantity: String(r.quantity) }), quantity: String(val) }; }"
+                  @blur="saveReceiptEdit(item.rowId, r, receiptDrafts[r.id]?.planNumber ?? r.planNumber, parsePositiveInt(receiptDrafts[r.id]?.quantity ?? String(r.quantity)))"
+                  @enter="saveReceiptEdit(item.rowId, r, receiptDrafts[r.id]?.planNumber ?? r.planNumber, parsePositiveInt(receiptDrafts[r.id]?.quantity ?? String(r.quantity)))"
+                  type="number"
+                  placeholder="数量"
+                  aria-label="数量（已保存）"
+                  class="alloc-qty"
+                />
                 <span class="alloc-tag">已存</span>
-                <Button
-                  theme="light"
-                  size="small"
-                  variant="outline"
-                  :disabled="submitting"
-                  aria-label="解锁此条记录以便修改"
-                  @click="unlockReceipt(item.rowId, r)"
-                >
-                  解锁
-                </Button>
               </div>
             </template>
 
@@ -639,8 +635,7 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
   margin-bottom: var(--td-spacer-1);
 }
 .alloc-row.historical {
-  /* 历史行多一个"解锁"按钮 → 留 96px */
-  grid-template-columns: minmax(0, 1fr) 72px 36px 72px;
+  grid-template-columns: minmax(0, 1fr) 96px 36px;
 }
 .alloc-row :deep(.t-input) {
   min-width: 0;
