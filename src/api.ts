@@ -165,6 +165,11 @@ export function createReceipts(
   return write('/purchase-arrival/receipts', 'POST', { poId, allocations });
 }
 
+// 解锁单条 receipt：物理删除，后端给前端留了空位让"确定"重新提交修正后的版本。
+export function deleteReceipt(receiptId: string): Promise<{ deleted: string }> {
+  return write(`/purchase-arrival/receipts/${receiptId}`, 'DELETE', {});
+}
+
 export function savePrintResult(operationId: string, result: PrintResult): Promise<PrintOperation> {
   return write(`/purchase-arrival/print-operations/${encodeURIComponent(operationId)}/result`, 'PUT', result);
 }

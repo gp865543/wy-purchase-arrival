@@ -14,7 +14,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { Button, Checkbox, Empty, Input, Loading, Message, Navbar, Search, Tag, Toast } from 'tdesign-mobile-vue';
 import CloseIcon from 'tdesign-icons-vue-next/esm/components/close';
-import { getPurchaseOrder, getPrintCounts, createReceipts, type Allocation, type PurchaseOrder, type PurchaseOrderDetailRow, type Receipt } from '../api';
+import { getPurchaseOrder, getPrintCounts, createReceipts, deleteReceipt, type Allocation, type PurchaseOrder, type PurchaseOrderDetailRow, type Receipt } from '../api';
 import PrintPreview from './PrintPreview.vue';
 import PoArrivalDevTools from './PoArrivalDevTools.vue';
 import { usePageBack } from '../pageBack';
@@ -38,7 +38,7 @@ const submitting = ref(false);
 // Per-row list of {planNumber, quantity}. Each row starts with one empty input.
 // `frozen = true` means the row was finalised by "确定" — the card locks into
 // read-only mode and the inputs become non-editable.
-type AllocDraft = { id: string; planNumber: string; quantity: string; frozen: boolean; isResidual: boolean };
+type AllocDraft = { id: string; planNumber: string; quantity: string; frozen: boolean; isResidual: boolean; receiptId?: string };
 const allocations = reactive<Record<number, AllocDraft[]>>({});
 const frozenRows = ref<Set<number>>(new Set());
 
@@ -216,11 +216,13 @@ async function commitReceipts() {
   }
   submitting.value = true;
   try {
-    // 收集选中行的所有分配，组装给后端的 allocations。
+    // 只提交"新"行（无 receiptId）。已解锁的行由于前端 receiptId 已删，
+    // 重新编辑后会作为新行提交；后端先 DELETE 再 POST 等价。
     const flat: Allocation[] = [];
     for (const rowId of selected.value) {
       for (const row of allocations[rowId] ?? []) {
-        if (row.isResidual) continue; // "剩余"行不在 receipts 里持久化（验收金额未知）
+        if (row.isResidual) continue;
+        if (row.receiptId) continue; // 已 saved，跳过
         const plan = row.planNumber.trim();
         const qty = parsePositiveInt(row.quantity);
         if (qty <= 0) continue;
@@ -228,7 +230,7 @@ async function commitReceipts() {
       }
     }
     if (!flat.length) {
-      Toast({ message: '没有可保存的分配行', theme: 'error', preventScrollThrough: false });
+      Toast({ message: '没有可保存的分配行（全部已存）', theme: 'warning', preventScrollThrough: false });
       return;
     }
     const result = await createReceipts(props.order.poId, flat);
@@ -271,6 +273,52 @@ async function commitReceipts() {
   } finally {
     submitting.value = false;
   }
+}
+
+// 解锁：物理删除 receipt（后端硬删），把 planNumber + quantity 回填到本地
+// allocations[rowId] 编辑区，移除 rowId 出于 frozenRows。操作员修改完再"确定"即可。
+async function unlockReceipt(rowId: number, receipt: Receipt) {
+  if (submitting.value) return;
+  submitting.value = true;
+  try {
+    await deleteReceipt(receipt.id);
+  } catch (cause) {
+    Toast({ message: cause instanceof Error ? cause.message : '解锁失败', theme: 'error', preventScrollThrough: false });
+    submitting.value = false;
+    return;
+  } finally {
+    submitting.value = false;
+  }
+  // 从后端 receipts 同步移除
+  const d = details.value.find(x => x.rowId === rowId);
+  if (d?.receipts) {
+    d.receipts = d.receipts.filter(r => r.id !== receipt.id);
+    d.receivedQuantity = Math.max(0, (d.receivedQuantity ?? 0) - receipt.quantity);
+  }
+  // 重新装入该 rowId 的草稿（含这一条 receipt 的当前内容）
+  const existing = allocations[rowId] ?? [];
+  // 过滤掉残余的 "剩余" 自动行 — 草稿重新算
+  const reals = existing.filter(r => !r.isResidual);
+  // 该 rowId 是否已经有同 planNumber 的草稿？有就跳过 receipt 内容（避免重复行）
+  const existingKeys = new Set(reals.map(r => `${r.planNumber.trim()}|${parsePositiveInt(r.quantity)}`));
+  if (!existingKeys.has(`${receipt.planNumber}|${receipt.quantity}`)) {
+    reals.push({
+      id: newLocalId(),
+      planNumber: receipt.planNumber,
+      quantity: String(receipt.quantity),
+      frozen: false,
+      isResidual: false,
+    });
+  }
+  allocations[rowId] = reals;
+  // unfreeze → 用户可以编辑
+  const next = new Set(frozenRows.value);
+  next.delete(rowId);
+  frozenRows.value = next;
+  // 把上面 push 进去的 receipt 内容回填草稿时把 receiptId 也带回（让 commit 知道这是修改过的同一行）
+  // 其实：解锁后 receiptId 已无效，下次"确定"会作为新行提交 + 后端硬删后重新加 — 等价
+  appendResidualIfNeeded(rowId);
+  Toast({ message: '已解锁，可修改后重新确定', theme: 'success', duration: 1500, preventScrollThrough: false });
 }
 
 // 仅用于打印预览：从 frozen 行的本地分配构建预览 allocations。
@@ -379,12 +427,22 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
           <div class="alloc-block" :aria-label="`${item.inventoryName}生产计划号分配`">
             <p class="alloc-heading">分配到生产计划号</p>
 
-            <!-- 已验收历史行（来自后端 receipts）— 只读 -->
+            <!-- 已验收历史行（来自后端 receipts）— 只读 + 可解锁 -->
             <template v-if="(item.receipts ?? []).length">
               <div v-for="r in item.receipts" :key="r.id" class="alloc-row frozen historical">
                 <Input :model-value="r.planNumber || '剩余'" disabled aria-label="生产计划号（已保存）" class="alloc-plan" />
                 <Input :model-value="String(r.quantity)" disabled aria-label="数量（已保存）" class="alloc-qty" />
                 <span class="alloc-tag">已存</span>
+                <Button
+                  theme="light"
+                  size="small"
+                  variant="outline"
+                  :disabled="submitting"
+                  aria-label="解锁此条记录以便修改"
+                  @click="unlockReceipt(item.rowId, r)"
+                >
+                  解锁
+                </Button>
               </div>
             </template>
 
@@ -575,10 +633,14 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
 }
 .alloc-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px 36px;
+  grid-template-columns: minmax(0, 1fr) 96px 36px auto;
   gap: var(--td-spacer-1);
   align-items: center;
   margin-bottom: var(--td-spacer-1);
+}
+.alloc-row.historical {
+  /* 历史行多一个"解锁"按钮 → 留 96px */
+  grid-template-columns: minmax(0, 1fr) 72px 36px 72px;
 }
 .alloc-row :deep(.t-input) {
   min-width: 0;
