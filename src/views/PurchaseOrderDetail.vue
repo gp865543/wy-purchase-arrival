@@ -75,7 +75,7 @@ function all(checked: boolean) {
 
 function ensureAllocRow(rowId: number) {
   if (!allocations[rowId]) {
-    allocations[rowId] = [{ id: crypto.randomUUID(), planNumber: '', quantity: '', frozen: false, isResidual: false }];
+    allocations[rowId] = [{ id: newLocalId(), planNumber: '', quantity: '', frozen: false, isResidual: false }];
   }
 }
 
@@ -87,7 +87,7 @@ function addAllocRow(rowId: number) {
   // 把残留的 "剩余" 自动行抽出来
   const residual = list.find(row => row.isResidual);
   const realRows = list.filter(row => !row.isResidual);
-  realRows.push({ id: crypto.randomUUID(), planNumber: '', quantity: '', frozen: false, isResidual: false });
+  realRows.push({ id: newLocalId(), planNumber: '', quantity: '', frozen: false, isResidual: false });
   allocations[rowId] = residual ? [...realRows, residual] : realRows;
   appendResidualIfNeeded(rowId);
 }
@@ -98,13 +98,26 @@ function removeAllocRow(rowId: number, index: number) {
   // Cannot remove the auto-residual row either.
   if (list[index]?.isResidual) return;
   list.splice(index, 1);
-  if (list.length === 0) list.push({ id: crypto.randomUUID(), planNumber: '', quantity: '', frozen: false, isResidual: false });
+  if (list.length === 0) list.push({ id: newLocalId(), planNumber: '', quantity: '', frozen: false, isResidual: false });
   appendResidualIfNeeded(rowId);
 }
 
 // 当前正在填的草稿总额（仅 non-residual + 有效值）。用于"本次剩余"实时显示。
 const parseTotalInDraft = (rowId: number) =>
   (allocations[rowId] ?? []).filter(r => !r.isResidual).reduce((sum, r) => sum + parsePositiveInt(r.quantity), 0);
+
+// crypto.randomUUID 在 http（无 secure context）/ 老 PDA 浏览器 / 某些 webview 下不可用。
+// 后端 receipt id 由 server 返回，这里只是 key — 不需要 RFC UUID 严格性，Math.random 足够。
+function newLocalId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch {
+    /* fall through */
+  }
+  return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function parsePositiveInt(value: string): number {
   if (!/^\d+$/.test(value)) return 0;
@@ -148,7 +161,7 @@ function appendResidualIfNeeded(rowId: number) {
   const rem = remainingOf(rowId);
   if (rem > 0) {
     if (residualIdx === -1) {
-      list.push({ id: crypto.randomUUID(), planNumber: '', quantity: String(rem), frozen: false, isResidual: true });
+      list.push({ id: newLocalId(), planNumber: '', quantity: String(rem), frozen: false, isResidual: true });
     } else {
       list[residualIdx].quantity = String(rem);
     }
