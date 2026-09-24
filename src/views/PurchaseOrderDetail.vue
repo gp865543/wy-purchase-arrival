@@ -62,7 +62,11 @@ const allSelected = computed(() => visibleItems.value.length > 0 && visibleItems
 const unfrozenItemsCount = computed(() =>
   details.value.filter(item => !frozenRows.value.has(item.rowId)).length,
 );
-const frozenCount = computed(() => frozenRows.value.size);
+// "打印已存" 按钮的可用性：以"是否有已存 receipt"为准——与是否 frozen 无关。
+// frozenRows 仅用作 commitReceipts 时的辅助标志（已 receiptId 跳过），不决定打印。
+const savedReceiptsCount = computed(() =>
+  details.value.reduce((sum, d) => sum + (d.receipts?.length ?? 0), 0),
+);
 
 function choose(rowId: number, checked: boolean) {
   if (submitting.value) return;
@@ -511,7 +515,7 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
         <Button theme="primary" :loading="submitting" :disabled="!selected.length || selected.some(id => !validSummaryFor(id))" @click="commitReceipts">
           确定
         </Button>
-        <Button theme="light" :disabled="!frozenCount || submitting" @click="openPreview(false)">
+        <Button theme="light" :disabled="!savedReceiptsCount || submitting" @click="openPreview(false)">
           打印已存
         </Button>
       </div>
