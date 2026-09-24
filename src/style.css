@@ -1,0 +1,18 @@
+:root:not([theme-mode='dark']) {
+  --td-bg-color-page: var(--td-gray-color-2);
+}
+
+html {
+  color: var(--td-text-color-primary);
+  background: var(--td-bg-color-page);
+  font-family: var(--td-font-family);
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  padding: var(--td-spacer-4) var(--td-spacer-3);
+  padding-bottom: calc(var(--td-spacer-4) + env(safe-area-inset-bottom));
+}

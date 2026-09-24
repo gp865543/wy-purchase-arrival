@@ -1,0 +1,13 @@
+{
+  "applications": [
+    {
+      "key": "purchase-arrival",
+      "name": "采购到货收货",
+      "description": "面向采购员的 PDA H5，按已审核 U8 采购订单查看与打印到货标签。",
+      "scope": "pda",
+      "applicationUrl": "/apps/purchase-arrival/",
+      "allUsers": true,
+      "entryPath": "/pda"
+    }
+  ]
+}
