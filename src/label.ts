@@ -38,13 +38,13 @@ export function labelLines(label: Label) {
   const height = dimensions.height * 5;
   // 标签字段布局：
   //   1. 订单号（左侧加粗）
-  //   2. 生产计划号（右侧加粗，仅手动分配时显示）
+  //   2. 计划号 / 剩余（右侧加粗；空 planNumber 显示"剩余"，让仓库识别）
   //   3. 到货日期（移到物料名称下方一行）
   //   4. 物料名称
   //   5. 规格
   //   6. 本张数量（来自分配；缺省回退订单数量）
   //   底部：打印次数 / 张序 / 操作人+时间
-  const planText = planNumber ? `计划号 ${planNumber}` : '';
+  const planText = planNumber ? `计划号 ${planNumber}` : '剩余';
   const arriveText = detail.arriveDate ? `到货日期 ${detail.arriveDate}` : '';
   const displayQty = allocationQuantity ?? detail.quantity;
   const original = [
