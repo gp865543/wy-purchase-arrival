@@ -111,11 +111,11 @@ export function listPurchaseOrders(keyword: string, page: number, signal: AbortS
 
 export function getPurchaseOrder(poId: number, signal: AbortSignal): Promise<{
   order: PurchaseOrder;
-  details: PurchaseOrderDetail[];
+  details: PurchaseOrderDetailRow[];
 }> {
-  // 后端返回单条 PO header + details 数组；前端组合成 { order, details } 形态。
+  // 后端返回单条 PO header + details 数组（含 receipts/receivedQuantity）；前端组合成 { order, details } 形态。
   return get(`/purchase-arrival/purchase-orders/${encodeURIComponent(poId)}`, signal, '订单明细读取失败，请重试')
-    .then((row: PurchaseOrder & { details: PurchaseOrderDetail[] }) => ({
+    .then((row: PurchaseOrder & { details: PurchaseOrderDetailRow[] }) => ({
       order: row,
       details: row.details,
     }));
@@ -133,12 +133,36 @@ export type Allocation = {
   quantity: number;
 };
 
+export type Receipt = {
+  id: string;
+  rowId: number;
+  planNumber: string;
+  quantity: number;
+  printedBy: string;
+  createdAt: string;
+};
+
+// 后端返回的明细行（带 receipts 历史 + receivedQuantity）
+export type PurchaseOrderDetailRow = PurchaseOrderDetail & {
+  receiptCount?: number;
+  receipts?: Receipt[];
+  receivedQuantity?: number;
+};
+
 export function createPrintOperation(
   poId: number,
   items: { rowId: number; copies: number }[],
   allocations: Allocation[] = [],
 ): Promise<PrintOperation> {
   return write('/purchase-arrival/print-operations', 'POST', { poId, items, allocations });
+}
+
+// "确定"即保存：追加 receipts（不可变历史），与打印完全解耦。
+export function createReceipts(
+  poId: number,
+  allocations: Allocation[],
+): Promise<{ poId: number; receipts: Receipt[] }> {
+  return write('/purchase-arrival/receipts', 'POST', { poId, allocations });
 }
 
 export function savePrintResult(operationId: string, result: PrintResult): Promise<PrintOperation> {

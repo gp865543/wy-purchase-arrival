@@ -14,7 +14,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { Button, Checkbox, Empty, Input, Loading, Message, Navbar, Search, Tag, Toast } from 'tdesign-mobile-vue';
 import CloseIcon from 'tdesign-icons-vue-next/esm/components/close';
-import { getPurchaseOrder, getPrintCounts, type Allocation, type PurchaseOrder, type PurchaseOrderDetail } from '../api';
+import { getPurchaseOrder, getPrintCounts, createReceipts, type Allocation, type PurchaseOrder, type PurchaseOrderDetailRow, type Receipt } from '../api';
 import PrintPreview from './PrintPreview.vue';
 import PoArrivalDevTools from './PoArrivalDevTools.vue';
 import { usePageBack } from '../pageBack';
@@ -26,7 +26,7 @@ const previewOpen = ref(false);
 const devTools = import.meta.env.DEV ? PoArrivalDevTools : null;
 const simulatePreview = ref(false);
 
-const details = ref<PurchaseOrderDetail[]>([]);
+const details = ref<PurchaseOrderDetailRow[]>([]);
 const counts = ref<Record<number, number> | undefined>(undefined);
 const countError = ref('');
 const selected = ref<number[]>([]);
@@ -38,7 +38,7 @@ const submitting = ref(false);
 // Per-row list of {planNumber, quantity}. Each row starts with one empty input.
 // `frozen = true` means the row was finalised by "确定" — the card locks into
 // read-only mode and the inputs become non-editable.
-type AllocDraft = { planNumber: string; quantity: string; frozen: boolean; isResidual: boolean };
+type AllocDraft = { id: string; planNumber: string; quantity: string; frozen: boolean; isResidual: boolean };
 const allocations = reactive<Record<number, AllocDraft[]>>({});
 const frozenRows = ref<Set<number>>(new Set());
 
@@ -58,6 +58,7 @@ const allSelected = computed(() => visibleItems.value.length > 0 && visibleItems
 const unfrozenItemsCount = computed(() =>
   details.value.filter(item => !frozenRows.value.has(item.rowId)).length,
 );
+const frozenCount = computed(() => frozenRows.value.size);
 
 function choose(rowId: number, checked: boolean) {
   if (submitting.value) return;
@@ -74,7 +75,7 @@ function all(checked: boolean) {
 
 function ensureAllocRow(rowId: number) {
   if (!allocations[rowId]) {
-    allocations[rowId] = [{ planNumber: '', quantity: '', frozen: false, isResidual: false }];
+    allocations[rowId] = [{ id: crypto.randomUUID(), planNumber: '', quantity: '', frozen: false, isResidual: false }];
   }
 }
 
@@ -86,7 +87,7 @@ function addAllocRow(rowId: number) {
   // 把残留的 "剩余" 自动行抽出来
   const residual = list.find(row => row.isResidual);
   const realRows = list.filter(row => !row.isResidual);
-  realRows.push({ planNumber: '', quantity: '', frozen: false, isResidual: false });
+  realRows.push({ id: crypto.randomUUID(), planNumber: '', quantity: '', frozen: false, isResidual: false });
   allocations[rowId] = residual ? [...realRows, residual] : realRows;
   appendResidualIfNeeded(rowId);
 }
@@ -97,9 +98,13 @@ function removeAllocRow(rowId: number, index: number) {
   // Cannot remove the auto-residual row either.
   if (list[index]?.isResidual) return;
   list.splice(index, 1);
-  if (list.length === 0) list.push({ planNumber: '', quantity: '', frozen: false, isResidual: false });
+  if (list.length === 0) list.push({ id: crypto.randomUUID(), planNumber: '', quantity: '', frozen: false, isResidual: false });
   appendResidualIfNeeded(rowId);
 }
+
+// 当前正在填的草稿总额（仅 non-residual + 有效值）。用于"本次剩余"实时显示。
+const parseTotalInDraft = (rowId: number) =>
+  (allocations[rowId] ?? []).filter(r => !r.isResidual).reduce((sum, r) => sum + parsePositiveInt(r.quantity), 0);
 
 function parsePositiveInt(value: string): number {
   if (!/^\d+$/.test(value)) return 0;
@@ -107,12 +112,20 @@ function parsePositiveInt(value: string): number {
   return Number.isSafeInteger(n) && n > 0 ? n : 0;
 }
 
+// 剩余可拆量 = 订单数量 - 已验收累计。该明细在 receivedQuantity === orderQuantity
+// 时彻底完成，无可拆量。历史验收记录来自后端 receipts，渲染为不可改的 frozen 行。
 const orderQtyOf = (rowId: number) => {
   const d = details.value.find(x => x.rowId === rowId);
   if (!d) return 0;
   const q = Number(d.quantity);
   return Number.isFinite(q) && q > 0 ? Math.floor(q) : 0;
 };
+const receivedQtyOf = (rowId: number) => {
+  const d = details.value.find(x => x.rowId === rowId);
+  return d?.receivedQuantity ?? 0;
+};
+const remainingBudgetOf = (rowId: number) =>
+  Math.max(0, orderQtyOf(rowId) - receivedQtyOf(rowId));
 
 const realAllocationsOf = (rowId: number): AllocDraft[] =>
   (allocations[rowId] ?? []).filter(r => !r.isResidual);
@@ -120,7 +133,9 @@ const realAllocationsOf = (rowId: number): AllocDraft[] =>
 const allocatedOf = (rowId: number) =>
   realAllocationsOf(rowId).reduce((sum, row) => sum + parsePositiveInt(row.quantity), 0);
 
-const remainingOf = (rowId: number) => orderQtyOf(rowId) - allocatedOf(rowId);
+// "剩余" = 订单数量 - 已存累计 - 草稿累计。给用户看，提示还能再拆多少。
+const remainingOf = (rowId: number) =>
+  Math.max(0, remainingBudgetOf(rowId) - parseTotalInDraft(rowId));
 
 const overAllocated = (rowId: number) => remainingOf(rowId) < 0;
 
@@ -133,7 +148,7 @@ function appendResidualIfNeeded(rowId: number) {
   const rem = remainingOf(rowId);
   if (rem > 0) {
     if (residualIdx === -1) {
-      list.push({ planNumber: '', quantity: String(rem), frozen: false, isResidual: true });
+      list.push({ id: crypto.randomUUID(), planNumber: '', quantity: String(rem), frozen: false, isResidual: true });
     } else {
       list[residualIdx].quantity = String(rem);
     }
@@ -153,13 +168,15 @@ watch(
   },
 );
 
-// 校验。订单数量 == 拆分配额 + 1 张剩余行 → 通过；超额 → 阻止。
+// 校验。草稿总额不能超过剩余可拆（订单 - 已存累计）。
 const validSummaryFor = (rowId: number) => {
   const list = allocations[rowId] ?? [];
   // 每条 "实际行" 都需要 planNumber + quantity > 0
   const reals = list.filter(r => !r.isResidual);
   const realValid = reals.every(r => r.planNumber.trim() !== '' && parsePositiveInt(r.quantity) > 0);
-  return realValid && !overAllocated(rowId);
+  if (!realValid) return false;
+  // 不能超过剩余可拆
+  return parseTotalInDraft(rowId) <= remainingBudgetOf(rowId);
 };
 
 async function loadCounts() {
@@ -175,38 +192,90 @@ async function loadCounts() {
   }
 }
 
-// "确定"：冻结当前每张选中卡片的分配列表，进入只读 + 弹出打印预览
-function preparePreview(simulate = false) {
+// "确定"：立刻落 receipts（不可变历史），冻结卡片，复用本地 allocations 给预览。
+// 打印与落库完全解耦——即使预览关闭 / 不打印，本次验收也保留。
+async function commitReceipts() {
   if (!selected.value.length) return;
   const bad = selected.value.filter(id => !validSummaryFor(id));
   if (bad.length) {
     Toast({ message: '请确认每张卡片的分配行都已填齐、且未超额', theme: 'error', preventScrollThrough: false });
     return;
   }
-  // 冻结：之后不能改
-  for (const rowId of selected.value) {
-    const list = allocations[rowId];
-    if (list) for (const row of list) row.frozen = true;
-    frozenRows.value.add(rowId);
+  submitting.value = true;
+  try {
+    // 收集选中行的所有分配，组装给后端的 allocations。
+    const flat: Allocation[] = [];
+    for (const rowId of selected.value) {
+      for (const row of allocations[rowId] ?? []) {
+        if (row.isResidual) continue; // "剩余"行不在 receipts 里持久化（验收金额未知）
+        const plan = row.planNumber.trim();
+        const qty = parsePositiveInt(row.quantity);
+        if (qty <= 0) continue;
+        flat.push({ rowId, planNumber: plan, quantity: qty });
+      }
+    }
+    if (!flat.length) {
+      Toast({ message: '没有可保存的分配行', theme: 'error', preventScrollThrough: false });
+      return;
+    }
+    const result = await createReceipts(props.order.poId, flat);
+    // 把后端回执的 ids/timestamps 合并到本地 allocations，并标记 frozen。
+    const idByKey = new Map<string, string>();
+    for (const r of result.receipts) {
+      idByKey.set(`${r.rowId}|${r.planNumber}|${r.quantity}`, r.id);
+    }
+    for (const rowId of selected.value) {
+      const list = allocations[rowId] ?? [];
+      for (const row of list) {
+        if (row.isResidual) continue;
+        const key = `${rowId}|${row.planNumber.trim()}|${parsePositiveInt(row.quantity)}`;
+        const id = idByKey.get(key);
+        if (id) (row as AllocDraft & { receiptId?: string }).receiptId = id;
+        row.frozen = true;
+      }
+      frozenRows.value.add(rowId);
+    }
     frozenRows.value = new Set(frozenRows.value);
-    // 选中行自动取消（已经"完成"，不再需要勾选）
-    selected.value = selected.value.filter(id => id !== rowId);
+    // 选中行清空（已冻结），并把详情里的 receivedQuantity 加上本次提交的总额（避免再次 GET）。
+    const submittedByRow = new Map<number, number>();
+    for (const a of flat) submittedByRow.set(a.rowId, (submittedByRow.get(a.rowId) ?? 0) + a.quantity);
+    for (const d of details.value) {
+      const inc = submittedByRow.get(d.rowId);
+      if (inc) d.receivedQuantity = (d.receivedQuantity ?? 0) + inc;
+    }
+    selected.value = [];
+    // 后端 frozen 行的 receipts 列表插入已展示快照，供后续 UI 立刻看。
+    for (const r of result.receipts) {
+      const d = details.value.find(x => x.rowId === r.rowId);
+      if (!d) continue;
+      if (!d.receipts) d.receipts = [];
+      d.receipts.push(r as Receipt);
+    }
+    Toast({ message: '本次到货验收已保存', theme: 'success', duration: 1500, preventScrollThrough: false });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : '保存失败，请重试';
+    Toast({ message, theme: 'error', preventScrollThrough: false });
+  } finally {
+    submitting.value = false;
   }
+}
+
+// 仅用于打印预览：从 frozen 行的本地分配构建预览 allocations。
+// 与 commitReceipts 不同 — 打印只决定哪些标签要打，receipts 才是已保存事实。
+function openPreview(simulate = false) {
   simulatePreview.value = simulate;
   previewOpen.value = true;
 }
 
-// 收集用于预览 / 后端的 Allocation 列表。每行 1 张标签，包括"剩余"行。
+// "打印已存" 用：基于后端 receipts 历史构造预览 allocations。
+// （"确定" 后 receipts 持久化了，"打印" 复用 receipts 而不是本地 frozen 草稿；
+// 这样即便用户编辑 UI 又关掉，再点"打印"也能正确打印已落库的事实。）
 function buildFlatAllocations(): Allocation[] {
   const flat: Allocation[] = [];
-  for (const [rowIdStr, list] of Object.entries(allocations)) {
-    const rowId = Number(rowIdStr);
-    if (!frozenRows.value.has(rowId)) continue;
-    for (const row of list) {
-      const plan = row.planNumber.trim();
-      const qty = parsePositiveInt(row.quantity);
-      if (qty <= 0) continue;
-      flat.push({ rowId, planNumber: plan, quantity: qty });
+  for (const d of details.value) {
+    if (!d.receipts?.length) continue;
+    for (const r of d.receipts) {
+      flat.push({ rowId: d.rowId, planNumber: r.planNumber, quantity: r.quantity });
     }
   }
   return flat;
@@ -288,53 +357,71 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
             <Tag v-else-if="counts" variant="light">{{ counts[item.rowId] ? `已打印${counts[item.rowId]}次` : '未打印' }}</Tag>
           </div>
           <p class="detail-meta">{{ item.inventoryCode }} · {{ item.spec || '无规格' }}</p>
-          <p class="detail-qty">订单数量 <strong>{{ item.quantity }}</strong></p>
+          <p class="detail-qty">
+              订单数量 <strong>{{ item.quantity }}</strong>
+              <span v-if="(item.receivedQuantity ?? 0) > 0" class="qty-received">已到货 {{ item.receivedQuantity }}</span>
+              <span class="qty-remaining" :class="{ zero: remainingBudgetOf(item.rowId) === 0 }">可拆 {{ remainingBudgetOf(item.rowId) }}</span>
+            </p>
 
           <div class="alloc-block" :aria-label="`${item.inventoryName}生产计划号分配`">
             <p class="alloc-heading">分配到生产计划号</p>
-            <div v-for="(row, idx) in allocations[item.rowId] ?? []" :key="idx" class="alloc-row" :class="{ residual: row.isResidual, frozen: row.frozen }">
-              <Input
-                v-model="row.planNumber"
-                :placeholder="row.isResidual ? '剩余（计划号可填）' : '计划号'"
-                :disabled="submitting || row.frozen"
-                aria-label="生产计划号"
-                class="alloc-plan"
-              />
-              <Input
-                v-model="row.quantity"
-                placeholder="数量"
-                type="number"
-                :disabled="submitting || row.frozen || row.isResidual"
-                aria-label="分配数量"
-                class="alloc-qty"
-              />
+
+            <!-- 已验收历史行（来自后端 receipts）— 只读 -->
+            <template v-if="(item.receipts ?? []).length">
+              <div v-for="r in item.receipts" :key="r.id" class="alloc-row frozen historical">
+                <Input :model-value="r.planNumber || '剩余'" disabled aria-label="生产计划号（已保存）" class="alloc-plan" />
+                <Input :model-value="String(r.quantity)" disabled aria-label="数量（已保存）" class="alloc-qty" />
+                <span class="alloc-tag">已存</span>
+              </div>
+            </template>
+
+            <!-- 新可拆分配区（仅当 remainingBudgetOf > 0 且未全冻）-->
+            <template v-if="remainingBudgetOf(item.rowId) > 0">
+              <div v-for="(row, idx) in allocations[item.rowId] ?? []" :key="`new-${row.id}`" class="alloc-row" :class="{ residual: row.isResidual }">
+                <Input
+                  v-model="row.planNumber"
+                  :placeholder="row.isResidual ? '剩余（计划号可填）' : '计划号'"
+                  :disabled="submitting"
+                  aria-label="生产计划号"
+                  class="alloc-plan"
+                />
+                <Input
+                  v-model="row.quantity"
+                  placeholder="数量"
+                  type="number"
+                  :disabled="submitting || row.isResidual"
+                  aria-label="分配数量"
+                  class="alloc-qty"
+                />
+                <Button
+                  v-if="!row.isResidual"
+                  theme="light"
+                  size="small"
+                  variant="outline"
+                  :disabled="submitting"
+                  aria-label="删除分配行"
+                  @click="removeAllocRow(item.rowId, idx)"
+                >
+                  <template #icon><CloseIcon aria-hidden="true" /></template>
+                </Button>
+                <span v-else class="alloc-tag">剩余</span>
+              </div>
               <Button
-                v-if="!row.frozen && !row.isResidual"
                 theme="light"
                 size="small"
                 variant="outline"
+                block
                 :disabled="submitting"
-                aria-label="删除分配行"
-                @click="removeAllocRow(item.rowId, idx)"
+                @click="addAllocRow(item.rowId)"
               >
-                <template #icon><CloseIcon aria-hidden="true" /></template>
+                + 添加分配行
               </Button>
-              <span v-else-if="row.isResidual" class="alloc-tag">剩余</span>
-            </div>
-            <Button
-              v-if="!frozenRows.has(item.rowId)"
-              theme="light"
-              size="small"
-              variant="outline"
-              block
-              :disabled="submitting"
-              @click="addAllocRow(item.rowId)"
-            >
-              + 添加分配行
-            </Button>
-            <p v-if="!frozenRows.has(item.rowId)" class="alloc-remaining" :class="{ negative: overAllocated(item.rowId) }">
-              剩余（自动计算）<strong>{{ remainingOf(item.rowId) }}</strong>
-            </p>
+              <p class="alloc-remaining" :class="{ negative: remainingBudgetOf(item.rowId) - parseTotalInDraft(item.rowId) < 0 }">
+                本次剩余（自动计算）<strong>{{ remainingBudgetOf(item.rowId) - parseTotalInDraft(item.rowId) }}</strong>
+                <span class="alloc-budget">可拆总额 {{ remainingBudgetOf(item.rowId) }}</span>
+              </p>
+            </template>
+            <p v-else class="alloc-done">本次到货全部完成</p>
           </div>
         </article>
       </template>
@@ -347,13 +434,16 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
       >
         所选明细中存在分配数量超过订单数量的行，请修改后再确定
       </p>
-      <component :is="devTools" v-if="devTools" :disabled="!selected.length || selected.some(id => !validSummaryFor(id))" @simulate="preparePreview(true)" />
+      <component :is="devTools" v-if="devTools" :disabled="!selected.length || selected.some(id => !validSummaryFor(id))" @simulate="openPreview(true)" />
       <div class="footer-actions">
         <Button theme="light" :disabled="submitting || !unfrozenItemsCount" :aria-pressed="allSelected" @click="all(!allSelected)">
           {{ allSelected ? '取消全选' : '全选' }}
         </Button>
-        <Button theme="primary" :loading="submitting" :disabled="!selected.length || selected.some(id => !validSummaryFor(id))" @click="preparePreview(false)">
+        <Button theme="primary" :loading="submitting" :disabled="!selected.length || selected.some(id => !validSummaryFor(id))" @click="commitReceipts">
           确定
+        </Button>
+        <Button theme="light" :disabled="!frozenCount || submitting" @click="openPreview(false)">
+          打印已存
         </Button>
       </div>
     </footer>
@@ -425,6 +515,40 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
 .detail-qty {
   margin: var(--td-spacer-1) 0 0;
   font-size: var(--td-font-size-body-medium);
+}
+.qty-received {
+  margin-left: var(--td-spacer-2);
+  color: var(--td-success-color);
+  font-size: var(--td-font-size-body-small);
+}
+.qty-remaining {
+  margin-left: var(--td-spacer-1);
+  color: var(--td-text-color-secondary);
+  font-size: var(--td-font-size-body-small);
+}
+.qty-remaining.zero {
+  color: var(--td-success-color);
+  font-weight: 600;
+}
+.alloc-budget {
+  margin-left: var(--td-spacer-2);
+  color: var(--td-text-color-placeholder);
+  font-size: var(--td-font-size-body-small);
+}
+.alloc-done {
+  margin: var(--td-spacer-2) 0 0;
+  padding: var(--td-spacer-2);
+  background: var(--td-success-color-1);
+  color: var(--td-success-color);
+  border-radius: var(--td-radius-default);
+  text-align: center;
+  font-size: var(--td-font-size-body-small);
+}
+.alloc-row.historical {
+  background: var(--td-bg-color-container);
+  border: 1px solid var(--td-component-border);
+  border-radius: var(--td-radius-default);
+  padding: var(--td-spacer-1);
 }
 .alloc-block {
   margin-top: var(--td-spacer-2);
