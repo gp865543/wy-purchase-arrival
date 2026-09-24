@@ -100,21 +100,29 @@ async function write(path: string, method: string, body: object) {
 
 // ----- 列表 / 详情 -----
 
-// 已审核采购订单列表（state=1 硬过滤），days 默认 90 天覆盖近一个季度的交货。
-// 后端实现：在 wy-fastapi/portal_identity/u8_routes.py 已有的
-// GET /api/v1/u8/purchase-orders 上加 alias /api/v1/purchase-arrival/purchase-orders
-// 或新文件 purchase_arrival.py 直接调 u8_reader.query_all。
+// 已审核采购订单列表（state=1 硬过滤，后端 purchase_arrival.py）。
+// 后端实现：wy-fastapi/portal_identity/purchase_arrival.py，挂在 /api/v1/purchase-arrival/。
 export function listPurchaseOrders(keyword: string, page: number, signal: AbortSignal): Promise<{
   items: PurchaseOrder[]; total: number; page: number; pageSize: number;
 }> {
-  throw new Error('TODO: 后端 purchase_arrival.py 实现后启用 listPurchaseOrders');
+  const params = new URLSearchParams({ keyword, page: String(page), pageSize: '20' });
+  return get(`/purchase-arrival/purchase-orders?${params}`, signal, '采购订单读取失败，请重试');
 }
 
 export function getPurchaseOrder(poId: number, signal: AbortSignal): Promise<{
   order: PurchaseOrder;
   details: PurchaseOrderDetail[];
 }> {
-  throw new Error('TODO: 后端 purchase_arrival.py 实现后启用 getPurchaseOrder');
+  // 后端返回单条 PO header + details 数组；前端组合成 { order, details } 形态。
+  return get(`/purchase-arrival/purchase-orders/${encodeURIComponent(poId)}`, signal, '订单明细读取失败，请重试')
+    .then((row: PurchaseOrder & { details: PurchaseOrderDetail[] }) => ({
+      order: row,
+      details: row.details,
+    }));
+}
+
+export function getSummary(signal: AbortSignal): Promise<{ reviewedCount: number; days: number; dateRange: { start: string; end: string } }> {
+  return get('/purchase-arrival/summary', signal, '已审核订单数量读取失败，请重试');
 }
 
 // ----- 打印 -----

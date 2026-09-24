@@ -4,10 +4,13 @@
 // 业务字段：U8 已审核采购订单（state=1），顶部汇总"已审核 PO 数"代替"待备料数"。
 // 完整实现等 wy-fastapi/portal_identity/purchase_arrival.py 落地后接通；当前骨架只展示
 // 空态和标题，路由切换到详情页的契约预留好。
+//
+// Issue #2 完成（2026-09-24）：后端 purchase_arrival.py 已落地 + 8 项测试通过，
+// api.ts 切换为真实 GET 调用，移除 .catch 占位。
 
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { Button, Empty, Loading, Navbar, Search, Tag } from 'tdesign-mobile-vue';
-import { listPurchaseOrders, type PurchaseOrder } from '../api';
+import { listPurchaseOrders, getSummary, type PurchaseOrder } from '../api';
 import { leaveToPortal } from '../portal';
 import PurchaseOrderDetail from './PurchaseOrderDetail.vue';
 
@@ -50,8 +53,7 @@ async function loadPlans(reset = false) {
   loading.value = true;
   error.value = '';
   try {
-    // 骨架：当前 api.ts 中 listPurchaseOrders 抛 TODO；try/catch 命中后展示空态。
-    const result = await listPurchaseOrders(keyword.value.trim(), page.value + 1, request.signal).catch(() => ({ items: [], total: 0, page: 1, pageSize: 20 }));
+    const result = await listPurchaseOrders(keyword.value.trim(), page.value + 1, request.signal);
     if (request.signal.aborted || requestId !== planRequestId) return;
     items.value = reset ? result.items : [...items.value, ...result.items];
     total.value = result.total;
@@ -72,8 +74,12 @@ async function loadSummary() {
   const request = new AbortController();
   const requestId = ++summaryRequestId;
   summaryController = request;
-  // TODO: 后端实现后调用 /purchase-arrival/summary 返回已审核 PO 数；当前占空。
-  void requestId;
+  try {
+    const result = await getSummary(request.signal);
+    if (!request.signal.aborted && requestId === summaryRequestId) reviewedCount.value = result.reviewedCount;
+  } catch {
+    // Keep a previous successful count; an initial failure leaves the title without a number.
+  }
 }
 
 function refresh() {

@@ -92,8 +92,7 @@ async function load() {
   details.value = [];
   selected.value = [];
   try {
-    // 骨架：当前 api.ts 抛 TODO；try/catch 命中后展示空态。
-    const result = await getPurchaseOrder(props.order.poId, request.signal).catch(() => ({ order: props.order, details: [] }));
+    const result = await getPurchaseOrder(props.order.poId, request.signal);
     if (!request.signal.aborted) {
       details.value = result.details;
       details.value.forEach(item => { printCopies.value[item.rowId] ??= '1'; });
