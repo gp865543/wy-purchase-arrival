@@ -48,6 +48,7 @@ const items = computed(() => {
     copies: number;
     isResidual: boolean;
     serial: number;
+    receiptId?: string;
   }> = [];
   let serial = 1;
   for (const alloc of props.allocations ?? []) {
@@ -61,6 +62,7 @@ const items = computed(() => {
       copies: 1,
       isResidual: alloc.planNumber === '' || alloc.planNumber === '剩余',
       serial: serial++,
+      receiptId: alloc.receiptId,
     });
   }
   return out;
@@ -220,7 +222,7 @@ onUnmounted(() => { window.removeEventListener('beforeunload', leave); document.
     <p v-else-if="!device && !error">请连接打印机以预览标签</p>
     <div v-if="device" class="label-pages" @scroll.passive="loadMore">
       <figure v-for="page in pages" :key="`${page.rowId}-${page.serial}`" class="paper-panel">
-        <PurchaseOrderLabel :paper="device.settings" :operator="operator" :operated-at="operatedAt" :order-no="order.orderNo" :detail="page.detail" :copies="'1'" :serial="page.serial" :plan-number="page.planNumber" :allocation-quantity="page.quantity" :print-count="counts ? (counts[page.rowId] ?? 0) + 1 : undefined" />
+        <PurchaseOrderLabel :paper="device.settings" :operator="operator" :operated-at="operatedAt" :order-no="order.orderNo" :detail="page.detail" :copies="'1'" :serial="page.serial" :plan-number="page.planNumber" :allocation-quantity="page.quantity" :receipt-id="page.receiptId" :print-count="counts ? (counts[page.rowId] ?? 0) + 1 : undefined" />
       </figure>
     </div>
   </Dialog>

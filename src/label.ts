@@ -19,6 +19,9 @@ export type Label = {
   printCount?: number;
   planNumber?: string;
   allocationQuantity?: number;
+  // QR 内容来源：优先 receipt.id（业务层稳定标识；同 receipt 反复打印 QR 不变）；
+  // 缺省回退 detail.rowId（向后兼容旧路径）。
+  receiptId?: string;
   paper?: PrinterSettings;
   operator?: string;
   operatedAt?: string;
@@ -105,8 +108,9 @@ export function compileLabel(settings: PrinterSettings, label: Label) {
   const sign = settings.direction === 0 ? 1 : -1;
   const x = (mm: number) => dots(mm) + sign * dots(settings.x);
   const y = (mm: number) => dots(mm) + sign * dots(settings.y);
-  // 二维码内容 = PO_PODetails.ID（明细行 ID，与 U8 字段 ID 对应；与桌面端 PR #106 详情页 row_id 同源）
-  const qrId = String(label.detail.rowId);
+  // 二维码内容：优先 receipt.id（业务层稳定；同 receipt 反复打印 QR 不变），
+// 缺省回退 detail.rowId（U8 主键；兼容 print-operation 老路径）。
+  const qrId = label.receiptId || String(label.detail.rowId);
   if (!qrId || qrId.length > 128) throw new Error('订单明细二维码 ID 无效');
   if (/["\\\x00-\x1f\x7f]/.test(qrId)) throw new Error('订单明细二维码 ID 含非法字符');
   const commands: Uint8Array[] = [];

@@ -320,12 +320,14 @@ function openPreview(simulate = false) {
 // "打印已存" 用：基于后端 receipts 历史构造预览 allocations。
 // （"确定" 后 receipts 持久化了，"打印" 复用 receipts 而不是本地 frozen 草稿；
 // 这样即便用户编辑 UI 又关掉，再点"打印"也能正确打印已落库的事实。）
+// 每条 allocation 带上 receiptId，label.ts 用 receiptId 生成二维码 —— 同 receipt
+// 反复打印 QR 内容稳定（始终指向同 receipt.id）。
 function buildFlatAllocations(): Allocation[] {
   const flat: Allocation[] = [];
   for (const d of details.value) {
     if (!d.receipts?.length) continue;
     for (const r of d.receipts) {
-      flat.push({ rowId: d.rowId, planNumber: r.planNumber, quantity: r.quantity });
+      flat.push({ rowId: d.rowId, planNumber: r.planNumber, quantity: r.quantity, receiptId: r.id });
     }
   }
   return flat;

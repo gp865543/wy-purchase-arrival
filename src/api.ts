@@ -131,6 +131,8 @@ export type Allocation = {
   rowId: number;
   planNumber: string;
   quantity: number;
+  // 后端 receipt.id（同 receipt 反复打印二维码不变）；缺失时回退到 rowId
+  receiptId?: string;
 };
 
 export type Receipt = {

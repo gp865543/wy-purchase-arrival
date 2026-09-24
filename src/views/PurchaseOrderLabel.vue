@@ -20,6 +20,9 @@ type Props = {
   planNumber?: string;
   // 分到本张的数量；如果没传则回退到 order detail.quantity
   allocationQuantity?: number;
+  // QR 内容来源：优先 receipt.id（业务层稳定；同 receipt 反复打印 QR 不变）；
+  // 缺省回退 detail.rowId（向后兼容旧路径）。
+  receiptId?: string;
 };
 
 const props = defineProps<Props>();
@@ -42,7 +45,7 @@ const layout = computed(() => {
 });
 const width = computed(() => labelSize(props.paper).width * 5);
 const height = computed(() => labelSize(props.paper).height * 5);
-const qr = computed(() => qrPath(String(props.detail.rowId)));
+const qr = computed(() => qrPath(props.receiptId ?? String(props.detail.rowId)));
 </script>
 
 <template>
