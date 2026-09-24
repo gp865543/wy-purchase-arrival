@@ -374,11 +374,16 @@ async function load() {
   details.value = [];
   selected.value = [];
   for (const k of Object.keys(allocations)) delete allocations[Number(k)];
+  // 根据后端 receipts 重建 frozenRows — 已存行都是 frozen。没保存过（无 receipts）的行
+  // 不在 set 里，会走"草稿"路径。
   frozenRows.value = new Set();
   try {
     const result = await getPurchaseOrder(props.order.poId, request.signal);
     if (!request.signal.aborted) {
       details.value = result.details;
+      for (const item of details.value) {
+        if (item.receipts?.length) frozenRows.value.add(item.rowId);
+      }
       details.value.forEach(item => {
         ensureAllocRow(item.rowId);
       });
