@@ -18,6 +18,8 @@ type Props = {
   serial: number;
   printCount?: number;
   planNumber?: string;
+  // 分到本张的数量；如果没传则回退到 order detail.quantity
+  allocationQuantity?: number;
 };
 
 const props = defineProps<Props>();
@@ -30,6 +32,7 @@ const layout = computed(() => {
     copies: props.copies,
     printCount: props.printCount,
     planNumber: props.planNumber,
+    allocationQuantity: props.allocationQuantity,
     paper: props.paper,
     operator: props.operator,
     operatedAt: props.operatedAt,

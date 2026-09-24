@@ -2,13 +2,16 @@
 // 工程结构克隆 wy-material-print/src/views/MaterialList.vue（顶部 Heading / 搜索 / 滚动内容 / 选中 /
 // 全选 / 底部打印预览入口 / 返回栈 / 安全区）。业务字段：PO 明细物料 + 手动拆分配到生产计划号。
 //
-// 业务流：
-//   1. 卡片显示物料 + 订单数量 + 打印份数 + 分配区（手动输入 "生产计划号 + 数量" 任意行）
-//   2. 底部"剩余（自动计算）"实时显示；超过订单数量给出红色警告、阻止"确定"
-//   3. 点击"确定" → 把分配列表随 print-operation 一起落到快照（后端持久化）
-//   4. PrintPreview 展示标签，标签内容包含计划号
+// 业务流（采购员一次到货验收）：
+//   1. 卡片显示物料 + 订单数量（参考用）
+//   2. 验货员按现场到货批次逐行录入：生产计划号 + 数量；可继续加累计
+//   3. 剩余数量 > 0 时，自动追加 1 行"剩余"行（计划号留空，让现场人员填；数量自动 = 剩余）
+//   4. 卡片底部实时显示"剩余（自动计算）"
+//   5. 点击"确定" → 卡片保存为修改后的样式（只读、显示每行的最终状态）
+//                → PrintPreview 按分配行数 = 标签数展示（含剩余行）
+//                → 后端落 print-operation 快照
 
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { Button, Checkbox, Empty, Input, Loading, Message, Navbar, Search, Tag, Toast } from 'tdesign-mobile-vue';
 import CloseIcon from 'tdesign-icons-vue-next/esm/components/close';
 import { getPurchaseOrder, getPrintCounts, type Allocation, type PurchaseOrder, type PurchaseOrderDetail } from '../api';
@@ -20,7 +23,6 @@ const props = defineProps<{ order: PurchaseOrder }>();
 const emit = defineEmits<{ back: [] }>();
 
 const previewOpen = ref(false);
-const printCopies = ref<Record<number, string>>({});
 const devTools = import.meta.env.DEV ? PoArrivalDevTools : null;
 const simulatePreview = ref(false);
 
@@ -34,9 +36,11 @@ const error = ref('');
 const submitting = ref(false);
 
 // Per-row list of {planNumber, quantity}. Each row starts with one empty input.
-// Edited in place; the "remaining" computed derives from this map.
-type AllocDraft = { planNumber: string; quantity: string };
+// `frozen = true` means the row was finalised by "确定" — the card locks into
+// read-only mode and the inputs become non-editable.
+type AllocDraft = { planNumber: string; quantity: string; frozen: boolean; isResidual: boolean };
 const allocations = reactive<Record<number, AllocDraft[]>>({});
+const frozenRows = ref<Set<number>>(new Set());
 
 let controller: AbortController | undefined;
 let countRequest: AbortController | undefined;
@@ -51,34 +55,50 @@ const visibleItems = computed(() => {
 
 const allSelected = computed(() => visibleItems.value.length > 0 && visibleItems.value.every(item => selected.value.includes(item.rowId)));
 
+const unfrozenItemsCount = computed(() =>
+  details.value.filter(item => !frozenRows.value.has(item.rowId)).length,
+);
+
 function choose(rowId: number, checked: boolean) {
   if (submitting.value) return;
+  if (frozenRows.value.has(rowId)) return; // 不能修改已 frozen 的行
   selected.value = checked ? [...selected.value, rowId] : selected.value.filter(id => id !== rowId);
 }
 function all(checked: boolean) {
   if (submitting.value) return;
-  const ids = new Set(visibleItems.value.map(item => item.rowId));
+  const ids = new Set(visibleItems.value.filter(item => !frozenRows.value.has(item.rowId)).map(item => item.rowId));
   selected.value = checked ? [...new Set([...selected.value, ...ids])] : selected.value.filter(id => !ids.has(id));
-}
-function toggleCopies(rowId: number, value: string) {
-  printCopies.value[rowId] = value;
 }
 
 // ----- allocation editing -----
 
 function ensureAllocRow(rowId: number) {
-  if (!allocations[rowId]) allocations[rowId] = [{ planNumber: '', quantity: '' }];
+  if (!allocations[rowId]) {
+    allocations[rowId] = [{ planNumber: '', quantity: '', frozen: false, isResidual: false }];
+  }
 }
 
 function addAllocRow(rowId: number) {
+  if (frozenRows.value.has(rowId)) return;
   ensureAllocRow(rowId);
-  allocations[rowId].push({ planNumber: '', quantity: '' });
+  // 不让用户手动加 "剩余" 行 — 那一行始终是自动追加的最后一行。
+  const list = allocations[rowId];
+  // 把残留的 "剩余" 自动行抽出来
+  const residual = list.find(row => row.isResidual);
+  const realRows = list.filter(row => !row.isResidual);
+  realRows.push({ planNumber: '', quantity: '', frozen: false, isResidual: false });
+  allocations[rowId] = residual ? [...realRows, residual] : realRows;
+  appendResidualIfNeeded(rowId);
 }
 
 function removeAllocRow(rowId: number, index: number) {
+  if (frozenRows.value.has(rowId)) return;
   const list = allocations[rowId];
+  // Cannot remove the auto-residual row either.
+  if (list[index]?.isResidual) return;
   list.splice(index, 1);
-  if (list.length === 0) list.push({ planNumber: '', quantity: '' });
+  if (list.length === 0) list.push({ planNumber: '', quantity: '', frozen: false, isResidual: false });
+  appendResidualIfNeeded(rowId);
 }
 
 function parsePositiveInt(value: string): number {
@@ -94,24 +114,53 @@ const orderQtyOf = (rowId: number) => {
   return Number.isFinite(q) && q > 0 ? Math.floor(q) : 0;
 };
 
-const allocatedOf = (rowId: number) => {
-  ensureAllocRow(rowId);
-  return allocations[rowId].reduce((sum, row) => sum + parsePositiveInt(row.quantity), 0);
-};
+const realAllocationsOf = (rowId: number): AllocDraft[] =>
+  (allocations[rowId] ?? []).filter(r => !r.isResidual);
+
+const allocatedOf = (rowId: number) =>
+  realAllocationsOf(rowId).reduce((sum, row) => sum + parsePositiveInt(row.quantity), 0);
 
 const remainingOf = (rowId: number) => orderQtyOf(rowId) - allocatedOf(rowId);
 
-const allocSummaryOf = (rowId: number) => {
-  const list = allocations[rowId] ?? [];
-  return list.filter(row => row.planNumber.trim() !== '' && parsePositiveInt(row.quantity) > 0)
-    .map<Allocation>(row => ({
-      rowId,
-      planNumber: row.planNumber.trim(),
-      quantity: parsePositiveInt(row.quantity),
-    }));
-};
-
 const overAllocated = (rowId: number) => remainingOf(rowId) < 0;
+
+// 剩余 > 0 时，确保列表末尾有一条自动"剩余"行（计划号空，quantity=剩余）；
+// 剩余 == 0 时移除任何残留的"剩余"行。
+function appendResidualIfNeeded(rowId: number) {
+  const list = allocations[rowId];
+  if (!list) return;
+  const residualIdx = list.findIndex(r => r.isResidual);
+  const rem = remainingOf(rowId);
+  if (rem > 0) {
+    if (residualIdx === -1) {
+      list.push({ planNumber: '', quantity: String(rem), frozen: false, isResidual: true });
+    } else {
+      list[residualIdx].quantity = String(rem);
+    }
+  } else if (residualIdx !== -1) {
+    list.splice(residualIdx, 1);
+  }
+}
+
+// 当任何数量字段变化时，自动重算"剩余"行
+watch(
+  () => JSON.stringify(allocations),
+  () => {
+    for (const rowIdStr of Object.keys(allocations)) {
+      const rowId = Number(rowIdStr);
+      if (!frozenRows.value.has(rowId)) appendResidualIfNeeded(rowId);
+    }
+  },
+);
+
+// 校验。订单数量 == 拆分配额 + 1 张剩余行 → 通过；超额 → 阻止。
+const validSummaryFor = (rowId: number) => {
+  const list = allocations[rowId] ?? [];
+  // 每条 "实际行" 都需要 planNumber + quantity > 0
+  const reals = list.filter(r => !r.isResidual);
+  const realValid = reals.every(r => r.planNumber.trim() !== '' && parsePositiveInt(r.quantity) > 0);
+  return realValid && !overAllocated(rowId);
+};
 
 async function loadCounts() {
   countRequest?.abort();
@@ -126,27 +175,41 @@ async function loadCounts() {
   }
 }
 
-function buildFlatAllocations(): Allocation[] {
-  const flat: Allocation[] = [];
-  for (const item of details.value) {
-    if (!selected.value.includes(item.rowId)) continue;
-    const summary = allocSummaryOf(item.rowId);
-    if (summary.length) flat.push(...summary);
-  }
-  return flat;
-}
-
+// "确定"：冻结当前每张选中卡片的分配列表，进入只读 + 弹出打印预览
 function preparePreview(simulate = false) {
   if (!selected.value.length) return;
-  // Block on negative remaining (data-entry error) but allow positive
-  // remaining (partial split is normal for staged receiving).
-  const bad = selected.value.filter(id => overAllocated(id));
+  const bad = selected.value.filter(id => !validSummaryFor(id));
   if (bad.length) {
-    Toast({ message: '明细分配数量超过订单数量，请修改', theme: 'error', preventScrollThrough: false });
+    Toast({ message: '请确认每张卡片的分配行都已填齐、且未超额', theme: 'error', preventScrollThrough: false });
     return;
+  }
+  // 冻结：之后不能改
+  for (const rowId of selected.value) {
+    const list = allocations[rowId];
+    if (list) for (const row of list) row.frozen = true;
+    frozenRows.value.add(rowId);
+    frozenRows.value = new Set(frozenRows.value);
+    // 选中行自动取消（已经"完成"，不再需要勾选）
+    selected.value = selected.value.filter(id => id !== rowId);
   }
   simulatePreview.value = simulate;
   previewOpen.value = true;
+}
+
+// 收集用于预览 / 后端的 Allocation 列表。每行 1 张标签，包括"剩余"行。
+function buildFlatAllocations(): Allocation[] {
+  const flat: Allocation[] = [];
+  for (const [rowIdStr, list] of Object.entries(allocations)) {
+    const rowId = Number(rowIdStr);
+    if (!frozenRows.value.has(rowId)) continue;
+    for (const row of list) {
+      const plan = row.planNumber.trim();
+      const qty = parsePositiveInt(row.quantity);
+      if (qty <= 0) continue;
+      flat.push({ rowId, planNumber: plan, quantity: qty });
+    }
+  }
+  return flat;
 }
 
 function closePreview() {
@@ -169,12 +232,12 @@ async function load() {
   details.value = [];
   selected.value = [];
   for (const k of Object.keys(allocations)) delete allocations[Number(k)];
+  frozenRows.value = new Set();
   try {
     const result = await getPurchaseOrder(props.order.poId, request.signal);
     if (!request.signal.aborted) {
       details.value = result.details;
       details.value.forEach(item => {
-        printCopies.value[item.rowId] ??= '1';
         ensureAllocRow(item.rowId);
       });
     }
@@ -190,7 +253,7 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
 </script>
 
 <template>
-  <PrintPreview v-if="previewOpen" :order="order" :details="details" :counts="counts" :print-copies="printCopies" :allocations="buildFlatAllocations()" :simulate="simulatePreview" @back="closePreview" />
+  <PrintPreview v-if="previewOpen" :order="order" :details="details" :counts="counts" :allocations="buildFlatAllocations()" :simulate="simulatePreview" @back="closePreview" />
   <div class="detail-screen">
     <Navbar title="到货明细" :fixed="false" left-arrow @left-click="back" />
     <header class="order-heading">
@@ -218,32 +281,22 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
           <Button size="small" @click="loadCounts">重试读取次数</Button>
         </div>
         <Empty v-if="!visibleItems.length" description="暂无匹配物料" />
-        <article v-for="item in details" :hidden="!visibleItems.includes(item)" :key="item.rowId" class="detail-card" :class="{ picked: selected.includes(item.rowId), printed: (counts?.[item.rowId] ?? 0) > 0, over: overAllocated(item.rowId) }">
+        <article v-for="item in details" :hidden="!visibleItems.includes(item)" :key="item.rowId" class="detail-card" :class="{ picked: selected.includes(item.rowId), printed: (counts?.[item.rowId] ?? 0) > 0, over: !frozenRows.has(item.rowId) && overAllocated(item.rowId), frozen: frozenRows.has(item.rowId) }">
           <div class="detail-heading">
-            <Checkbox :checked="selected.includes(item.rowId)" :disabled="submitting" @change="checked => choose(item.rowId, checked)">{{ item.inventoryName }}</Checkbox>
-            <Tag v-if="counts" variant="light">{{ counts[item.rowId] ? `已打印${counts[item.rowId]}次` : '未打印' }}</Tag>
+            <Checkbox :checked="selected.includes(item.rowId)" :disabled="submitting || frozenRows.has(item.rowId)" @change="checked => choose(item.rowId, checked)">{{ item.inventoryName }}</Checkbox>
+            <Tag v-if="frozenRows.has(item.rowId)" variant="light" theme="success">已完成</Tag>
+            <Tag v-else-if="counts" variant="light">{{ counts[item.rowId] ? `已打印${counts[item.rowId]}次` : '未打印' }}</Tag>
           </div>
           <p class="detail-meta">{{ item.inventoryCode }} · {{ item.spec || '无规格' }}</p>
           <p class="detail-qty">订单数量 <strong>{{ item.quantity }}</strong></p>
-          <label class="copies-row">
-            <span>打印份数</span>
-            <input
-              type="number"
-              :value="printCopies[item.rowId] || '1'"
-              min="1"
-              max="10000"
-              :disabled="submitting"
-              @input="toggleCopies(item.rowId, ($event.target as HTMLInputElement).value)"
-            />
-          </label>
 
-          <div v-if="selected.includes(item.rowId)" class="alloc-block" :aria-label="`${item.inventoryName}生产计划号分配`">
+          <div class="alloc-block" :aria-label="`${item.inventoryName}生产计划号分配`">
             <p class="alloc-heading">分配到生产计划号</p>
-            <div v-for="(row, idx) in allocations[item.rowId]" :key="idx" class="alloc-row">
+            <div v-for="(row, idx) in allocations[item.rowId] ?? []" :key="idx" class="alloc-row" :class="{ residual: row.isResidual, frozen: row.frozen }">
               <Input
                 v-model="row.planNumber"
-                placeholder="计划号"
-                :disabled="submitting"
+                :placeholder="row.isResidual ? '剩余（计划号可填）' : '计划号'"
+                :disabled="submitting || row.frozen"
                 aria-label="生产计划号"
                 class="alloc-plan"
               />
@@ -251,11 +304,12 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
                 v-model="row.quantity"
                 placeholder="数量"
                 type="number"
-                :disabled="submitting"
+                :disabled="submitting || row.frozen || row.isResidual"
                 aria-label="分配数量"
                 class="alloc-qty"
               />
               <Button
+                v-if="!row.frozen && !row.isResidual"
                 theme="light"
                 size="small"
                 variant="outline"
@@ -265,8 +319,10 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
               >
                 <template #icon><CloseIcon aria-hidden="true" /></template>
               </Button>
+              <span v-else-if="row.isResidual" class="alloc-tag">剩余</span>
             </div>
             <Button
+              v-if="!frozenRows.has(item.rowId)"
               theme="light"
               size="small"
               variant="outline"
@@ -276,7 +332,7 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
             >
               + 添加分配行
             </Button>
-            <p class="alloc-remaining" :class="{ negative: overAllocated(item.rowId) }">
+            <p v-if="!frozenRows.has(item.rowId)" class="alloc-remaining" :class="{ negative: overAllocated(item.rowId) }">
               剩余（自动计算）<strong>{{ remainingOf(item.rowId) }}</strong>
             </p>
           </div>
@@ -291,12 +347,12 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
       >
         所选明细中存在分配数量超过订单数量的行，请修改后再确定
       </p>
-      <component :is="devTools" v-if="devTools" :disabled="!selected.length || selected.some(id => overAllocated(id))" @simulate="preparePreview(true)" />
+      <component :is="devTools" v-if="devTools" :disabled="!selected.length || selected.some(id => !validSummaryFor(id))" @simulate="preparePreview(true)" />
       <div class="footer-actions">
-        <Button theme="light" :disabled="submitting" :aria-pressed="allSelected" @click="all(!allSelected)">
+        <Button theme="light" :disabled="submitting || !unfrozenItemsCount" :aria-pressed="allSelected" @click="all(!allSelected)">
           {{ allSelected ? '取消全选' : '全选' }}
         </Button>
-        <Button theme="primary" :loading="submitting" :disabled="!selected.length || selected.some(id => overAllocated(id))" @click="preparePreview(false)">
+        <Button theme="primary" :loading="submitting" :disabled="!selected.length || selected.some(id => !validSummaryFor(id))" @click="preparePreview(false)">
           确定
         </Button>
       </div>
@@ -370,23 +426,6 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
   margin: var(--td-spacer-1) 0 0;
   font-size: var(--td-font-size-body-medium);
 }
-.copies-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--td-spacer-2);
-  margin-top: var(--td-spacer-2);
-  font-size: var(--td-font-size-body-medium);
-}
-.copies-row input {
-  width: 88px;
-  height: 36px;
-  padding: 0 var(--td-spacer-1);
-  border: 1px solid var(--td-component-border);
-  border-radius: var(--td-radius-default);
-  text-align: right;
-  font: inherit;
-}
 .alloc-block {
   margin-top: var(--td-spacer-2);
   padding-top: var(--td-spacer-2);
@@ -421,6 +460,27 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
 }
 .detail-card.over {
   border-color: var(--td-error-color);
+}
+.detail-card.frozen {
+  background: var(--td-bg-color-container);
+  border-color: var(--td-success-color);
+}
+.alloc-row.residual {
+  background: var(--td-warning-color-1);
+  border-radius: var(--td-radius-default);
+  padding: var(--td-spacer-1);
+}
+.alloc-row.frozen {
+  opacity: 0.85;
+}
+.alloc-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 var(--td-spacer-2);
+  color: var(--td-warning-color);
+  font-size: var(--td-font-size-body-small);
 }
 .over-banner {
   margin: 0 0 var(--td-spacer-2);

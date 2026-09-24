@@ -18,7 +18,7 @@ import { deviceSnapshot, printer, sendStoredLabels, type DeviceSnapshot } from '
 import { usePageBack } from '../pageBack';
 import BluetoothConnection from './BluetoothConnection.vue';
 
-const props = defineProps<{ order: PurchaseOrder; details: PurchaseOrderDetail[]; printCopies: Record<number, string>; counts?: Record<number, number>; allocations?: Allocation[]; simulate?: boolean }>();
+const props = defineProps<{ order: PurchaseOrder; details: PurchaseOrderDetail[]; counts?: Record<number, number>; allocations?: Allocation[]; simulate?: boolean }>();
 const operator = getOperatorName();
 const SIMULATED_DEVICE: DeviceSnapshot = { deviceId: 'SIMULATED', settings: { language: 'TSPL', paperWidth: 76, paperHeight: 59, mediaType: 'gap', gap: 2, blackMarkHeight: 0, blackMarkOffset: 0, x: 0, y: 0, direction: 0, dpi: 300 } };
 const operatedAt = ref(new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(5, 16));
@@ -37,46 +37,37 @@ const locked = computed(() => busy.value || unsaved.value);
 const emit = defineEmits<{ back: [] }>();
 const back = usePageBack('preview', () => emit('back'), () => !locked.value && !progressOpen.value);
 
-// selected rows + copies from printCopies; details 全量通过 props 进来。
-// `allocations` 按 rowId 索引；planNumber 用循环方式串到 pages（每张标签带一个计划号）。
-const allocationsByRow = computed(() => {
-  const out = new Map<number, Allocation[]>();
-  for (const a of props.allocations ?? []) {
-    const list = out.get(a.rowId);
-    if (list) list.push(a);
-    else out.set(a.rowId, [a]);
+// 每条 allocation → 1 张标签（含"剩余"行）。一条明细 N 个分配 = N 张标签。
+// printCopies 已删除：分配行数 = 标签数。
+const items = computed(() => {
+  const out: Array<{
+    rowId: number;
+    detail: PurchaseOrderDetail;
+    planNumber: string;
+    quantity: number;
+    copies: number;
+    isResidual: boolean;
+    serial: number;
+  }> = [];
+  let serial = 1;
+  for (const alloc of props.allocations ?? []) {
+    const detail = props.details.find(d => d.rowId === alloc.rowId);
+    if (!detail) continue;
+    out.push({
+      rowId: alloc.rowId,
+      detail,
+      planNumber: alloc.planNumber,
+      quantity: alloc.quantity,
+      copies: 1,
+      isResidual: alloc.planNumber === '' || alloc.planNumber === '剩余',
+      serial: serial++,
+    });
   }
   return out;
 });
-const items = computed(() => Object.entries(props.printCopies)
-  .filter(([_, copies]) => /^[1-9]\d*$/.test(copies) && Number(copies) <= 10000)
-  .map(([rowId, copies]) => ({
-    rowId: Number(rowId),
-    detail: props.details.find(d => d.rowId === Number(rowId))!,
-    copies: Number(copies),
-    allocations: allocationsByRow.value.get(Number(rowId)) ?? [],
-  }))
-  .filter(item => item.detail));
-const total = computed(() => items.value.reduce((sum, item) => sum + item.copies, 0));
+const total = computed(() => items.value.length);
+const pages = computed(() => items.value.slice(0, limit.value));
 const limit = ref(20);
-const pages = computed(() => {
-  const result = [];
-  for (const row of items.value) {
-    // If allocations exist, the i-th copy is bound to the i-th allocation's
-    // plan number (caller is responsible for matching copies <= allocations.length
-    // or padding with the last allocation; here we fall back to "no plan" when
-    // there's a surplus).
-    const planBySerial = row.allocations.length
-      ? row.allocations.map((a, i) => a.planNumber)
-      : [];
-    for (let serial = 1; serial <= row.copies; serial++) {
-      if (result.length >= limit.value) return result;
-      const planNumber = planBySerial[serial - 1] ?? planBySerial[planBySerial.length - 1] ?? '';
-      result.push({ ...row, serial, planNumber });
-    }
-  }
-  return result;
-});
 function loadMore(event: Event) {
   const body = event.currentTarget as HTMLElement;
   if (body.scrollHeight - body.scrollTop - body.clientHeight < 160) limit.value += 20;
@@ -105,19 +96,31 @@ async function print() {
 
     // Step 1: create the immutable snapshot on the backend. The backend reads U8
     // and stores header + selected detail lines so a later review sees what was
-    // actually printed even if U8 changes.
+    // 创建后端 operation：每条 allocation = 后端 1 张标签，所以 copies 字段固定传 1。
+    // 后端快照里的 "copies" 仍然是该 row 的标签总数（所有 allocation 行）。
     const created = await createPrintOperation(
       props.order.poId,
-      items.value.map(item => ({ rowId: item.rowId, copies: item.copies })),
+      // 后端 items 的 copies = 该 row 下有多少分配行（每行 = 1 张标签）
+      (() => {
+        const counts = new Map<number, number>();
+        for (const alloc of props.allocations ?? []) {
+          counts.set(alloc.rowId, (counts.get(alloc.rowId) ?? 0) + 1);
+        }
+        return Array.from(counts.entries()).map(([rowId, copies]) => ({ rowId, copies }));
+      })(),
       props.allocations ?? [],
     );
     operation.value = created;
     operatedAt.value = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(5, 16);
     result.value = {
       device: snapshot,
-      pages: created.items.flatMap(item => Array.from({ length: item.copies }, (_, index) => ({
-        rowId: item.rowId, serial: index + 1, status: 'pending' as const, error: '',
-      }))),
+      // 每条 allocation = 1 张标签；序号按 details.displayOrder 走（已在 items 序列里）
+      pages: items.value.map(item => ({
+        rowId: item.rowId,
+        serial: item.serial,
+        status: 'pending' as const,
+        error: '',
+      })),
     };
     unsaved.value = true;
 
@@ -132,37 +135,36 @@ async function print() {
     // batches by printer free-bytes, writes via the K329 printer.printTspl
     // shell bridge, and surfaces per-batch sent/error states.
     try {
-      const compiledBatches = created.items.map(item => ({
+      // 每条 allocation = 1 张标签；用本地 props.allocations 编译，因为 created.items 的
+      // material 字段不带 planNumber（后端只持久化 inventory 元数据）。
+      const compiledBatches = items.value.map(item => ({
         rowId: item.rowId,
-        copies: item.copies,
-        commands: Array.from({ length: item.copies }, (_, index) => compileLabel(snapshot.settings, {
+        serial: item.serial,
+        commands: [compileLabel(snapshot.settings, {
           orderNo: props.order.orderNo,
-          detail: item.material as PurchaseOrderDetail,
-          serial: index + 1,
-          copies: String(item.copies),
-          printCount: item.printCount,
+          detail: item.detail,
+          serial: item.serial,
+          copies: '1',
+          planNumber: item.planNumber,
+          printCount: (props.counts?.[item.rowId] ?? 0) + 1,
           operator,
           operatedAt: operatedAt.value,
-        })),
+          // 多带一个 quantity 给 label.ts 用作"分配数量"
+          allocationQuantity: item.quantity,
+        })],
       }));
       const pictures = compiledBatches.flatMap(b => b.commands.map(command => storedLabel(command, Number(snapshot.settings.dpi))));
       await sendStoredLabels(snapshot, pictures, (start, count, sendErr) => {
-        // Map flat picture indexes to (rowId, serial) pairs by walking through
-        // the ordered compiledBatches.
-        let cursor = 0;
-        for (const batch of compiledBatches) {
-          if (start >= cursor + batch.commands.length) { cursor += batch.commands.length; continue; }
-          if (start < cursor) break;
-          const localStart = start - cursor;
-          const localCount = Math.min(count, batch.commands.length - localStart);
-          for (let i = 0; i < localCount; i++) {
-            const page = result.value!.pages.find(p => p.rowId === batch.rowId && p.serial === localStart + i + 1);
-            if (page) {
-              page.status = sendErr ? 'error' : 'sent';
-              page.error = sendErr?.message ?? '';
-            }
+        // pictures 索引对应 compiledBatches 顺序；每个 batch = 1 张标签。
+        for (let i = 0; i < count; i++) {
+          const batchIndex = start + i;
+          const batch = compiledBatches[batchIndex];
+          if (!batch) continue;
+          const page = result.value!.pages.find(p => p.rowId === batch.rowId && p.serial === batch.serial);
+          if (page) {
+            page.status = sendErr ? 'error' : 'sent';
+            page.error = sendErr?.message ?? '';
           }
-          break;
         }
       }, message => { stage.value = message; }, () => { batchNotice.value = '打印尚未完成，请继续等待'; });
     } catch (cause) {
@@ -212,13 +214,13 @@ onUnmounted(() => { window.removeEventListener('beforeunload', leave); document.
       </div>
     </template>
     <p v-if="error && !progressOpen" role="alert">{{ error }}</p>
-    <p class="preview-total">{{ items.length }} 条明细 · 共 {{ total }} 张</p>
+    <p class="preview-total">{{ total }} 张标签</p>
     <p v-if="simulate" class="preview-simulate">模拟打印 · 不向打印机发送数据</p>
     <p v-if="readingSettings">正在读取标签尺寸…</p>
     <p v-else-if="!device && !error">请连接打印机以预览标签</p>
     <div v-if="device" class="label-pages" @scroll.passive="loadMore">
       <figure v-for="page in pages" :key="`${page.rowId}-${page.serial}`" class="paper-panel">
-        <PurchaseOrderLabel :paper="device.settings" :operator="operator" :operated-at="operatedAt" :order-no="order.orderNo" :detail="page.detail" :copies="String(page.copies)" :serial="page.serial" :plan-number="page.planNumber" :print-count="counts ? (counts[page.rowId] ?? 0) + 1 : undefined" />
+        <PurchaseOrderLabel :paper="device.settings" :operator="operator" :operated-at="operatedAt" :order-no="order.orderNo" :detail="page.detail" :copies="'1'" :serial="page.serial" :plan-number="page.planNumber" :allocation-quantity="page.quantity" :print-count="counts ? (counts[page.rowId] ?? 0) + 1 : undefined" />
       </figure>
     </div>
   </Dialog>
