@@ -192,3 +192,68 @@ export function savePrintResult(operationId: string, result: PrintResult): Promi
 export function getPrintCounts(poId: number, signal: AbortSignal): Promise<{ counts: Record<number, number> }> {
   return get(`/purchase-arrival/purchase-orders/${encodeURIComponent(poId)}/print-counts`, signal, '打印次数读取失败，请重试');
 }
+
+// ----- 入库 (Storage Putaway) -----
+
+// 入库记录
+export type PutawayRecord = {
+  id: string;
+  receiptId: string;
+  locationCode: string;
+  quantity: number;
+  isLineSide: boolean;
+  operatorId: string;
+  createdAt: string;
+  cancelledAt: string | null;
+};
+
+// 创建入库
+export function createPutaway(params: {
+  receiptId: string;
+  locationCode: string;
+  quantity: number;
+  isLineSide?: boolean;
+}): Promise<PutawayRecord> {
+  return write('/storage/putaway', 'POST', params);
+}
+
+// 查询入库记录
+export function getPutaway(putawayId: string): Promise<PutawayRecord> {
+  return get(`/storage/putaway/${encodeURIComponent(putawayId)}`, new AbortController().signal, '入库记录读取失败');
+}
+
+// 取消入库
+export function cancelPutaway(putawayId: string): Promise<{ cancelled: string }> {
+  return write(`/storage/putaway/${encodeURIComponent(putawayId)}`, 'DELETE', {});
+}
+
+// 查询货位列表
+export type StorageLocation = {
+  id: string;
+  code: string;
+  name: string;
+  locationType: string;
+  isDefault: boolean;
+  departmentCode: string | null;
+};
+
+export function listStorageLocations(params?: {
+  locationType?: string;
+  departmentCode?: string;
+}): Promise<StorageLocation[]> {
+  const query = new URLSearchParams(params as Record<string, string>);
+  return get(`/storage/locations?${query}`, new AbortController().signal, '货位列表读取失败');
+}
+
+// 查询入库记录列表
+export function listPutaways(params?: {
+  receiptId?: string;
+  locationCode?: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<{ items: PutawayRecord[]; total: number; page: number; pageSize: number }> {
+  const query = new URLSearchParams(
+    Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)]))
+  );
+  return get(`/storage/putaway?${query}`, new AbortController().signal, '入库记录列表读取失败');
+}
