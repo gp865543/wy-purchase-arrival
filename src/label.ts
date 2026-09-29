@@ -22,6 +22,8 @@ export type Label = {
   // QR 内容来源：优先 receipt.id（业务层稳定标识；同 receipt 反复打印 QR 不变）；
   // 缺省回退 detail.rowId（向后兼容旧路径）。
   receiptId?: string;
+  // 采购日期（U8 PO_POMain.dPODate，order header 字段，不在 detail 上）
+  purchaseDate?: string;
   paper?: PrinterSettings;
   operator?: string;
   operatedAt?: string;
@@ -35,33 +37,35 @@ export function labelSize(paper?: PrinterSettings) {
 }
 
 export function labelLines(label: Label) {
-  const { orderNo, detail, serial, copies, printCount, planNumber, allocationQuantity } = label;
+  const { orderNo, detail, serial, copies, printCount, planNumber, allocationQuantity, purchaseDate } = label;
   const dimensions = labelSize(label.paper);
   const width = dimensions.width * 5;
   const height = dimensions.height * 5;
   // 标签字段布局：
-  //   1. 订单号（左侧加粗）
-  //   2. 计划号 / 剩余（右侧加粗；空 planNumber 显示"剩余"，让仓库识别）
-  //   3. 到货日期（移到物料名称下方一行）
-  //   4. 物料名称
-  //   5. 规格
-  //   6. 本张数量（来自分配；缺省回退订单数量）
+  //   1. 订单号（顶部左）
+  //   2. 计划号 / 剩余（顶部右；空 planNumber 显示"剩余"）
+  //   3. 物料名称
+  //   4. 采购日期（PO_POMain.dPODate）
+  //   5. 到货日期（PO_PODetails.dArriveDate）
+  //   6. 到货数量（来自分配；缺省回退订单数量）
   //   底部：打印次数 / 张序 / 操作人+时间
   const planText = planNumber ? `计划号 ${planNumber}` : '剩余';
+  const purchaseText = purchaseDate ? `采购日期 ${purchaseDate}` : '';
   const arriveText = detail.arriveDate ? `到货日期 ${detail.arriveDate}` : '';
   const displayQty = allocationQuantity ?? detail.quantity;
   const original = [
     { x: 14, y: 24, size: 16, anchor: 'start', text: orderNo },
     { x: width - 14, y: 24, size: 16, anchor: 'end', text: planText },
     { x: 14, y: 72, size: 16, anchor: 'start', text: detail.inventoryName },
-    { x: 14, y: 104, size: 16, anchor: 'start', text: arriveText },
-    { x: 14, y: 136, size: 16, anchor: 'start', text: `本张数量 ${displayQty}` },
+    { x: 14, y: 104, size: 16, anchor: 'start', text: purchaseText },
+    { x: 14, y: 136, size: 16, anchor: 'start', text: arriveText },
+    { x: 14, y: 168, size: 16, anchor: 'start', text: `到货数量 ${displayQty}` },
     { x: 14, y: height - 15, size: 10, anchor: 'start', text: `打印次数 ${printCount ?? '待确认'}` },
     { x: width / 2, y: height - 15, size: 10, anchor: 'middle', text: `第 ${serial} 张 / 共 ${copies} 张` },
     { x: width - 14, y: height - 15, size: 10, anchor: 'end', text: `${label.operator || '—'} ${label.operatedAt || ''}`.trim() },
   ].map((line, index) => ({
     ...line,
-    underlineStart: index === 2 ? 0 : index === 4 ? 5 : -1,
+    underlineStart: index === 2 ? 0 : index === 5 ? 5 : -1,
     text: line.text.replace(/\\/g, '＼').replace(/"/g, '＂').replace(/\r\n|[\r\n\t\u2028\u2029]/g, ' ').replace(/[\p{Cc}\p{Cf}]/gu, ''),
   }));
   for (let size = 16; size >= 10; size--) {
@@ -69,12 +73,12 @@ export function labelLines(label: Label) {
     const body: typeof original = [];
     let y = 24 + step;
     let fits = true;
-    for (let field = 2; field <= 4; field++) {
-      if (field >= 3) y = height - 72 + size * 0.35 + (field === 3 ? -step / 2 : step / 2);
+    for (let field = 2; field <= 5; field++) {
+      if (field >= 3) y = height - 72 + size * 0.35 + (field === 3 ? -step / 2 : (field === 4 ? 0 : step / 2));
       const source = original[field];
       const text = source.text.replace(/ +/g, ' ').trim();
       let line = '', used = 0;
-      const available = () => width - 28 - (field >= 3 ? 82 : 0);
+      const available = () => width - 28 - (field >= 3 ? 82 : 0);  // unchanged: bottom block still shrinks for QR
       for (const char of text) {
         const charWidth = char.charCodeAt(0) < 128 && !/[MW@%]/.test(char) ? size * 0.65 : size;
         if (used + charWidth > available() && line) {
