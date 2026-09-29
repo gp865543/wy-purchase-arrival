@@ -50,11 +50,11 @@ export function labelLines(label: Label) {
   //   6. 到货数量（来自分配；缺省回退订单数量）
   //   底部：打印次数 / 张序 / 操作人+时间
   const planText = planNumber ? `计划号 ${planNumber}` : '剩余';
-  const purchaseText = purchaseDate ? `采购日期 ${purchaseDate}` : '';
+  const purchaseText = purchaseDate ? `采购日期 ${purchaseDate.slice(0, 10)}` : '';
   // 到货日期 = 这次打印的时刻（operatedAt）。业务语义：PDA 打一张贴纸贴袋子上 =
   // 这一次"到货"。U8 PO_PODetails.dArriveDate 不准（PO 创建时预计），用前端
   // operatedAt 反映真实到货瞬间。
-  const arriveText = label.operatedAt ? `到货日期 ${label.operatedAt}` : '';
+  const arriveText = label.operatedAt ? `到货日期 ${label.operatedAt.slice(0, 10)}` : '';
   const displayQty = allocationQuantity ?? detail.quantity;
   const original = [
     { x: 14, y: 24, size: 16, anchor: 'start', text: orderNo },
@@ -65,7 +65,7 @@ export function labelLines(label: Label) {
     { x: 14, y: 168, size: 16, anchor: 'start', text: `到货数量 ${displayQty}` },
     { x: 14, y: height - 15, size: 10, anchor: 'start', text: `打印次数 ${printCount ?? '待确认'}` },
     { x: width / 2, y: height - 15, size: 10, anchor: 'middle', text: `第 ${serial} 张 / 共 ${copies} 张` },
-    { x: width - 14, y: height - 15, size: 10, anchor: 'end', text: `${label.operator || '—'} ${label.operatedAt || ''}`.trim() },
+    { x: width - 14, y: height - 15, size: 10, anchor: 'end', text: `${label.operator || '—'} ${(label.operatedAt || '').slice(0, 10)}`.trim() },
   ].map((line, index) => ({
     ...line,
     underlineStart: index === 2 ? 0 : index === 5 ? 5 : -1,

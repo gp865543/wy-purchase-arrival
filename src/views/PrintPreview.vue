@@ -21,7 +21,7 @@ import BluetoothConnection from './BluetoothConnection.vue';
 const props = defineProps<{ order: PurchaseOrder; details: PurchaseOrderDetail[]; counts?: Record<number, number>; allocations?: Allocation[]; simulate?: boolean }>();
 const operator = ref('');
 const SIMULATED_DEVICE: DeviceSnapshot = { deviceId: 'SIMULATED', settings: { language: 'TSPL', paperWidth: 76, paperHeight: 59, mediaType: 'gap', gap: 2, blackMarkHeight: 0, blackMarkOffset: 0, x: 0, y: 0, direction: 0, dpi: 300 } };
-const operatedAt = ref(new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(5, 16));
+const operatedAt = ref(new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(0, 10));
 const bluetooth = ref(false), busy = ref(false), unsaved = ref(false);
 const error = ref('');
 const stage = ref('');
@@ -113,7 +113,7 @@ async function print() {
       props.allocations ?? [],
     );
     operation.value = created;
-    operatedAt.value = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(5, 16);
+    operatedAt.value = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(0, 10);
     result.value = {
       device: snapshot,
       // 每条 allocation = 1 张标签；序号按 details.displayOrder 走（已在 items 序列里）
