@@ -82,7 +82,7 @@ export function labelLines(label: Label) {
     const bottomLimit = height - 15;  // = y of footer line, no body row may exceed this
     let y = topOffset;
     let fits = true;
-    for (let field = 2; field <= 5; field++) {
+    for (let field = 2; field <= 4; field++) {
       const source = original[field];
       const text = source.text.replace(/ +/g, ' ').trim();
       let line = '', used = 0;
