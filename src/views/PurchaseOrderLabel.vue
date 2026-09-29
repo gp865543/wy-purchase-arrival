@@ -23,6 +23,8 @@ type Props = {
   // QR 内容来源：优先 receipt.id（业务层稳定；同 receipt 反复打印 QR 不变）；
   // 缺省回退 detail.rowId（向后兼容旧路径）。
   receiptId?: string;
+  // 采购日期（PO header.orderDate，独立于 detail.arriveDate）
+  purchaseDate?: string;
 };
 
 const props = defineProps<Props>();
@@ -36,6 +38,8 @@ const layout = computed(() => {
     printCount: props.printCount,
     planNumber: props.planNumber,
     allocationQuantity: props.allocationQuantity,
+    receiptId: props.receiptId,
+    purchaseDate: props.purchaseDate,
     paper: props.paper,
     operator: props.operator,
     operatedAt: props.operatedAt,
