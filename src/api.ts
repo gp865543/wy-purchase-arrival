@@ -79,11 +79,31 @@ function login() {
   location.assign(url.href);
 }
 
-async function get(path: string, signal: AbortSignal, error = '采购订单读取失败，请重试') {
-  const response = await fetch(`${apiBase}${path}`, { credentials: 'same-origin', signal });
-  if (response.status === 401) { login(); throw new Error('登录已失效，请重新登录'); }
-  if (!response.ok) throw new Error(error);
-  return response.json();
+async function get(path: string, signal: AbortSignal, error = '采购订单读取失败', timeoutMs = 30_000) {
+  // Belt-and-braces timeout: the caller-supplied AbortController still
+  // controls unmount / nav cancellation; this 30s ceiling guards against
+  // the vite dev proxy occasionally hanging its socket after a server
+  // restart, which used to leave the PDA spinning forever.
+  const timeoutController = new AbortController();
+  const onCallerAbort = () => timeoutController.abort();
+  signal.addEventListener('abort', onCallerAbort);
+  const timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${apiBase}${path}`, {
+      credentials: 'same-origin',
+      signal: timeoutController.signal,
+    });
+    if (response.status === 401) { login(); throw new Error('登录已失效，请重新登录'); }
+    if (!response.ok) throw new Error(error);
+    return response.json();
+  } catch (cause) {
+    if (signal.aborted) throw cause;
+    if (timeoutController.signal.aborted) throw new Error(`${error}（请求超时）`);
+    throw cause;
+  } finally {
+    clearTimeout(timeoutId);
+    signal.removeEventListener('abort', onCallerAbort);
+  }
 }
 
 async function write(path: string, method: string, body: object) {
