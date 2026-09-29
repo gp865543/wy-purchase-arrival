@@ -51,7 +51,10 @@ export function labelLines(label: Label) {
   //   底部：打印次数 / 张序 / 操作人+时间
   const planText = planNumber ? `计划号 ${planNumber}` : '剩余';
   const purchaseText = purchaseDate ? `采购日期 ${purchaseDate}` : '';
-  const arriveText = detail.arriveDate ? `到货日期 ${detail.arriveDate}` : '';
+  // 到货日期 = 这次打印的时刻（operatedAt）。业务语义：PDA 打一张贴纸贴袋子上 =
+  // 这一次"到货"。U8 PO_PODetails.dArriveDate 不准（PO 创建时预计），用前端
+  // operatedAt 反映真实到货瞬间。
+  const arriveText = label.operatedAt ? `到货日期 ${label.operatedAt}` : '';
   const displayQty = allocationQuantity ?? detail.quantity;
   const original = [
     { x: 14, y: 24, size: 16, anchor: 'start', text: orderNo },
@@ -71,25 +74,37 @@ export function labelLines(label: Label) {
   for (let size = 16; size >= 10; size--) {
     const step = size * 1.8;
     const body: typeof original = [];
-    let y = 24 + step;
+    // Anchor the 4 center-row fields (fields 2..5) starting just below the
+    // top header and flowing linearly down. The bottom row (field=5)
+    // reaches close to the bottom footer (height - 15); the linear layout
+    // prevents overlap regardless of how long the date fields are.
+    const topOffset = 24 + step;  // = y of field=2 first line
+    const bottomLimit = height - 15;  // = y of footer line, no body row may exceed this
+    let y = topOffset;
     let fits = true;
     for (let field = 2; field <= 5; field++) {
-      if (field >= 3) y = height - 72 + size * 0.35 + (field === 3 ? -step / 2 : (field === 4 ? 0 : step / 2));
       const source = original[field];
       const text = source.text.replace(/ +/g, ' ').trim();
       let line = '', used = 0;
-      const available = () => width - 28 - (field >= 3 ? 82 : 0);  // unchanged: bottom block still shrinks for QR
+      // Reserve a strip on the right for the QR code in the bottom half
+      // (fields 3..5). The QR sits in the bottom-right corner; shrinking
+      // the body lines below field=3 keeps text from colliding with it.
+      const available = () => width - 28 - (field >= 3 ? 82 : 0);
       for (const char of text) {
         const charWidth = char.charCodeAt(0) < 128 && !/[MW@%]/.test(char) ? size * 0.65 : size;
         if (used + charWidth > available() && line) {
+          // No wrapping in the bottom fields (date / qty) — overflow rejects.
           if (field >= 3) { fits = false; break; }
           body.push({ ...source, text: line, size, y });
           y += step; line = ''; used = 0;
         }
         line += char; used += charWidth;
       }
+      if (field >= 3 && used > available()) { fits = false; break; }
       body.push({ ...source, text: line, size, y });
-      if (used > available() || (field < 3 ? y + size * 0.3 > height - 109 : y > height - 35)) fits = false;
+      if (used > available()) { fits = false; break; }
+      // Stop if next line would push into the footer.
+      if (y + size * 0.6 > bottomLimit) { fits = false; break; }
       y += step;
     }
     if (fits) return [...original.slice(0, 2).filter(line => line.text).map(line => ({ ...line, size })), ...body, ...original.slice(5)];

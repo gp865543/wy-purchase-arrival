@@ -10,7 +10,7 @@ import BluetoothIcon from 'tdesign-icons-vue-next/esm/components/bluetooth';
 import CloseIcon from 'tdesign-icons-vue-next/esm/components/close';
 import PrintIcon from 'tdesign-icons-vue-next/esm/components/print';
 import { Button, Dialog, Loading, Popup, Toast } from 'tdesign-mobile-vue';
-import { createPrintOperation, getPrintCounts, getOperatorName, savePrintResult, type Allocation, type PrintResult, type PrintOperation, type PurchaseOrder, type PurchaseOrderDetail } from '../api';
+import { createPrintOperation, getPrintCounts, ensureOperatorName, savePrintResult, type Allocation, type PrintResult, type PrintOperation, type PurchaseOrder, type PurchaseOrderDetail } from '../api';
 import PurchaseOrderLabel from './PurchaseOrderLabel.vue';
 import { compileLabel, labelSize } from '../label';
 import { storedLabel } from '../pcx';
@@ -19,7 +19,7 @@ import { usePageBack } from '../pageBack';
 import BluetoothConnection from './BluetoothConnection.vue';
 
 const props = defineProps<{ order: PurchaseOrder; details: PurchaseOrderDetail[]; counts?: Record<number, number>; allocations?: Allocation[]; simulate?: boolean }>();
-const operator = getOperatorName();
+const operator = ref('');
 const SIMULATED_DEVICE: DeviceSnapshot = { deviceId: 'SIMULATED', settings: { language: 'TSPL', paperWidth: 76, paperHeight: 59, mediaType: 'gap', gap: 2, blackMarkHeight: 0, blackMarkOffset: 0, x: 0, y: 0, direction: 0, dpi: 300 } };
 const operatedAt = ref(new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(5, 16));
 const bluetooth = ref(false), busy = ref(false), unsaved = ref(false);
@@ -149,7 +149,7 @@ async function print() {
           copies: '1',
           planNumber: item.planNumber,
           printCount: (props.counts?.[item.rowId] ?? 0) + 1,
-          operator,
+          operator: operator.value,
           operatedAt: operatedAt.value,
           // 多带一个 quantity 给 label.ts 用作"分配数量"
           allocationQuantity: item.quantity,
@@ -194,8 +194,10 @@ async function refreshConnection() {
   finally { readingSettings.value = false; }
 }
 function closeBluetooth() { bluetooth.value = false; refreshConnection(); }
-onMounted(() => {
+onMounted(async () => {
   window.addEventListener('beforeunload', leave);
+  // operator 没值时主动拉一次 user info，确保标签右下角能显示操作人。
+  operator.value = await ensureOperatorName();
   if (props.simulate) return;
   document.addEventListener('visibilitychange', refreshConnection);
   refreshConnection();

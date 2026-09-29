@@ -11,6 +11,25 @@ const apiBase = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '');
 let operatorName = '';
 export const getOperatorName = () => operatorName;
 
+/** Fetch `/user/info` once and cache the operator's display name. Safe to
+ call multiple times — only does a network round-trip when the cache is
+ empty. Used by PrintPreview / Detail on mount so the label can show the
+ operator's real name instead of an empty dash.
+*/
+export async function ensureOperatorName(signal?: AbortSignal): Promise<string> {
+  if (operatorName) return operatorName;
+  try {
+    const user = await get(
+      '/user/info', signal ?? new AbortController().signal, '未登录', 5000,
+    ) as { realName?: string; username?: string } | undefined;
+    const name = user?.realName || user?.username || '';
+    if (name) operatorName = name;
+  } catch {
+    /* swallow — getOperatorName() returns '' if still empty */
+  }
+  return operatorName;
+}
+
 // 采购订单主表行（来自 U8 PO_POMain，与 wy-portal web-antdv-next 桌面端的契约一致；
 // 移动端只需要更少字段，列出清单页面用得到的）。
 export type PurchaseOrder = {
