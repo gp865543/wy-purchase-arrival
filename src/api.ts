@@ -23,7 +23,9 @@ export async function ensureOperatorName(signal?: AbortSignal): Promise<string> 
       '/user/info', signal ?? new AbortController().signal, '未登录', 5000,
     ) as { realName?: string; username?: string } | undefined;
     const name = user?.realName || user?.username || '';
-    if (name) operatorName = name;
+    // 当后端 /user/info 返回 401/空（直接走 PDA 壳未带 portal session）时，
+    // 用默认 "操作员" 让标签右下角字段不空 — PDA 现场仍能看到行。
+    operatorName = name || '操作员';
   } catch {
     /* swallow — getOperatorName() returns '' if still empty */
   }

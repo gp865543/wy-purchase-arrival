@@ -146,7 +146,7 @@ async function print() {
           orderNo: props.order.orderNo,
           detail: item.detail,
           serial: item.serial,
-          copies: '1',
+          copies: String(items.value.length),
           planNumber: item.planNumber,
           printCount: (props.counts?.[item.rowId] ?? 0) + 1,
           operator: operator.value,

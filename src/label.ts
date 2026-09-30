@@ -62,7 +62,7 @@ export function labelLines(label: Label) {
     { x: 14, y: 72, size: 16, anchor: 'start', text: detail.inventoryName },
     { x: 14, y: 104, size: 16, anchor: 'start', text: purchaseText },
     { x: 14, y: 136, size: 16, anchor: 'start', text: arriveText },
-    { x: 14, y: 168, size: 16, anchor: 'start', text: `到货数量 ${displayQty}` },
+    { x: 14, y: 173, size: 16, anchor: 'start', text: `到货数量 ${displayQty}` },
     { x: 14, y: height - 15, size: 10, anchor: 'start', text: `打印次数 ${printCount ?? '待确认'}` },
     { x: width / 2, y: height - 15, size: 10, anchor: 'middle', text: `第 ${serial} 张 / 共 ${copies} 张` },
     { x: width - 14, y: height - 15, size: 10, anchor: 'end', text: `${label.operator || '—'} ${(label.operatedAt || '').slice(0, 10)}`.trim() },
