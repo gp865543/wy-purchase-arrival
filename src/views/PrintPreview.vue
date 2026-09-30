@@ -2,10 +2,11 @@
 // 克隆 wy-material-print/src/views/PrintPreview.vue 的完整工程结构（Dialog + 蓝牙 + 进度
 // Popup + 模拟入口 + 真实打印链路）。业务字段映射：plan→order, materials→details,
 // preparations→selected rows + copies。骨架阶段完成 Issue #2/#3 后接通 Issue #4：
-// createPrintOperation（拿 operationId）+ sendStoredLabels（按 rowId 编译 + 推送）
+// createPrintOperation（拿 operationId）+ sendLabels（每张标签 printTspl 直发，material-print 协议）
 // + savePrintResult（写回 page 状态）。
 
 import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { ensureOperatorName } from '../api';
 import BluetoothIcon from 'tdesign-icons-vue-next/esm/components/bluetooth';
 import CloseIcon from 'tdesign-icons-vue-next/esm/components/close';
 import PrintIcon from 'tdesign-icons-vue-next/esm/components/print';
@@ -13,13 +14,13 @@ import { Button, Dialog, Loading, Popup, Toast } from 'tdesign-mobile-vue';
 import { createPrintOperation, getPrintCounts, getOperatorName, savePrintResult, type Allocation, type PrintResult, type PrintOperation, type PurchaseOrder, type PurchaseOrderDetail } from '../api';
 import PurchaseOrderLabel from './PurchaseOrderLabel.vue';
 import { compileLabel, labelSize } from '../label';
-import { storedLabel } from '../pcx';
-import { deviceSnapshot, printer, sendStoredLabels, type DeviceSnapshot } from '../printer';
+
+import { deviceSnapshot, printer, sendLabels, type DeviceSnapshot } from '../printer';
 import { usePageBack } from '../pageBack';
 import BluetoothConnection from './BluetoothConnection.vue';
 
 const props = defineProps<{ order: PurchaseOrder; details: PurchaseOrderDetail[]; counts?: Record<number, number>; allocations?: Allocation[]; simulate?: boolean }>();
-const operator = getOperatorName();
+const operator = ref(getOperatorName());
 const SIMULATED_DEVICE: DeviceSnapshot = { deviceId: 'SIMULATED', settings: { language: 'TSPL', paperWidth: 76, paperHeight: 59, mediaType: 'gap', gap: 2, blackMarkHeight: 0, blackMarkOffset: 0, x: 0, y: 0, direction: 0, dpi: 300 } };
 const operatedAt = ref(new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(5, 16));
 const bluetooth = ref(false), busy = ref(false), unsaved = ref(false);
@@ -133,48 +134,37 @@ async function print() {
       return;
     }
 
-    // Step 2: compile TSPL/PCX labels and push to the printer. sendStoredLabels
-    // batches by printer free-bytes, writes via the K329 printer.printTspl
-    // shell bridge, and surfaces per-batch sent/error states.
+    // Step 2: compile each label as a full TSPL bitmap and push to the printer.
+    // Matches wy-material-print/PrintPreview.vue print() — uses sendLabels
+    // (single printTspl per label, no K329 PCX upload protocol). The previous
+    // sendStoredLabels path silently hung the PDA shell because the K329
+    // upload protocol isn't supported on the production shell bridges.
     try {
-      // 每条 allocation = 1 张标签；用本地 props.allocations 编译，因为 created.items 的
-      // material 字段不带 planNumber（后端只持久化 inventory 元数据）。
-      const compiledBatches = items.value.map(item => ({
-        rowId: item.rowId,
+      const commands = items.value.map(item => compileLabel(snapshot.settings, {
+        orderNo: props.order.orderNo,
+        detail: item.detail,
         serial: item.serial,
-        commands: [compileLabel(snapshot.settings, {
-          orderNo: props.order.orderNo,
-          detail: item.detail,
-          serial: item.serial,
-          copies: '1',
-          planNumber: item.planNumber,
-          printCount: (props.counts?.[item.rowId] ?? 0) + 1,
-          operator,
-          operatedAt: operatedAt.value,
-          // 多带一个 quantity 给 label.ts 用作"分配数量"
-          allocationQuantity: item.quantity,
-        })],
+        copies: '1',
+        planNumber: item.planNumber,
+        printCount: (props.counts?.[item.rowId] ?? 0) + 1,
+        operator: operator.value,
+        operatedAt: operatedAt.value,
+        allocationQuantity: item.quantity,
       }));
-      const pictures = compiledBatches.flatMap(b => b.commands.map(command => storedLabel(command, Number(snapshot.settings.dpi))));
-      await sendStoredLabels(snapshot, pictures, (start, count, sendErr) => {
-        // pictures 索引对应 compiledBatches 顺序；每个 batch = 1 张标签。
-        for (let i = 0; i < count; i++) {
-          const batchIndex = start + i;
-          const batch = compiledBatches[batchIndex];
-          if (!batch) continue;
-          const page = result.value!.pages.find(p => p.rowId === batch.rowId && p.serial === batch.serial);
-          if (page) {
-            page.status = sendErr ? 'error' : 'sent';
-            page.error = sendErr?.message ?? '';
-          }
+      let confirmed = 0;
+      stage.value = `正在打印 0/${commands.length}`;
+      await sendLabels(snapshot, commands, completed => {
+        for (const page of result.value!.pages.slice(confirmed, completed)) {
+          page.status = 'sent';
+          page.error = '';
         }
-      }, message => { stage.value = message; }, () => { batchNotice.value = '打印尚未完成，请继续等待'; });
+        confirmed = completed;
+        stage.value = `正在打印 ${completed}/${commands.length}`;
+      });
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : '打印失败';
-      if (!result.value.pages.some(page => page.status === 'error')) {
-        const pending = result.value.pages.find(page => page.status === 'pending');
-        if (pending) { pending.status = 'error'; pending.error = error.value; }
-      }
+      const pending = result.value.pages.find(page => page.status === 'pending');
+      if (pending) { pending.status = 'error'; pending.error = error.value; }
     }
     await persist();
     if (!error.value) stage.value = '打印完成，请核对出纸';
@@ -194,8 +184,10 @@ async function refreshConnection() {
   finally { readingSettings.value = false; }
 }
 function closeBluetooth() { bluetooth.value = false; refreshConnection(); }
-onMounted(() => {
+onMounted(async () => {
   window.addEventListener('beforeunload', leave);
+  // 主动拉一次 user info，确保标签右下角显示操作人。
+  operator.value = await ensureOperatorName();
   if (props.simulate) return;
   document.addEventListener('visibilitychange', refreshConnection);
   refreshConnection();
