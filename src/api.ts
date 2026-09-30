@@ -11,6 +11,27 @@ const apiBase = (import.meta.env.VITE_API_BASE || '/api/v1').replace(/\/$/, '');
 let operatorName = '';
 export const getOperatorName = () => operatorName;
 
+/** Fetch `/user/info` once and cache the operator's display name. Safe to
+ call multiple times — only does a network round-trip when the cache is
+ empty. Used by PrintPreview / Detail on mount so the label can show the
+ operator's real name instead of an empty dash.
+*/
+export async function ensureOperatorName(signal?: AbortSignal): Promise<string> {
+  if (operatorName) return operatorName;
+  try {
+    const user = await get(
+      '/user/info', signal ?? new AbortController().signal, '未登录', 5000,
+    ) as { realName?: string; username?: string } | undefined;
+    const name = user?.realName || user?.username || '';
+    // 当后端 /user/info 返回 401/空（直接走 PDA 壳未带 portal session）时，
+    // 用默认 "操作员" 让标签右下角字段不空 — PDA 现场仍能看到行。
+    operatorName = name || '操作员';
+  } catch {
+    /* swallow — getOperatorName() returns '' if still empty */
+  }
+  return operatorName;
+}
+
 // 采购订单主表行（来自 U8 PO_POMain，与 wy-portal web-antdv-next 桌面端的契约一致；
 // 移动端只需要更少字段，列出清单页面用得到的）。
 export type PurchaseOrder = {
@@ -79,11 +100,31 @@ function login() {
   location.assign(url.href);
 }
 
-async function get(path: string, signal: AbortSignal, error = '采购订单读取失败，请重试') {
-  const response = await fetch(`${apiBase}${path}`, { credentials: 'same-origin', signal });
-  if (response.status === 401) { login(); throw new Error('登录已失效，请重新登录'); }
-  if (!response.ok) throw new Error(error);
-  return response.json();
+async function get(path: string, signal: AbortSignal, error = '采购订单读取失败', timeoutMs = 30_000) {
+  // Belt-and-braces timeout: the caller-supplied AbortController still
+  // controls unmount / nav cancellation; this 30s ceiling guards against
+  // the vite dev proxy occasionally hanging its socket after a server
+  // restart, which used to leave the PDA spinning forever.
+  const timeoutController = new AbortController();
+  const onCallerAbort = () => timeoutController.abort();
+  signal.addEventListener('abort', onCallerAbort);
+  const timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${apiBase}${path}`, {
+      credentials: 'same-origin',
+      signal: timeoutController.signal,
+    });
+    if (response.status === 401) { login(); throw new Error('登录已失效，请重新登录'); }
+    if (!response.ok) throw new Error(error);
+    return response.json();
+  } catch (cause) {
+    if (signal.aborted) throw cause;
+    if (timeoutController.signal.aborted) throw new Error(`${error}（请求超时）`);
+    throw cause;
+  } finally {
+    clearTimeout(timeoutId);
+    signal.removeEventListener('abort', onCallerAbort);
+  }
 }
 
 async function write(path: string, method: string, body: object) {
@@ -193,9 +234,64 @@ export function getPrintCounts(poId: number, signal: AbortSignal): Promise<{ cou
   return get(`/purchase-arrival/purchase-orders/${encodeURIComponent(poId)}/print-counts`, signal, '打印次数读取失败，请重试');
 }
 
-// ----- 入库 (Storage Putaway) -----
+// ====== 采购入库扫码 (Storage Putaway) ======
+// Issue #72: PDA 扫码入库。
+// H5 标签 QR 编码 = PurchaseArrivalReceipt.id（UUID 字符串）。
+// 后端按 UUID 查本系统 receipts 拿 (poId, rowId, planNumber, quantity)；
+// 再按 (poId, rowId) 实时调 U8 拿物品名 / 采购日期 / 到货日期 / 规格 / 供应商。
 
-// 入库记录
+// U8 仓库（从 U8 Warehouse 主表实时取）
+export type U8Warehouse = {
+  code: string;
+  name: string;
+  address: string;
+  person: string;
+  enabled: boolean;
+};
+
+export function listWarehouses(signal?: AbortSignal): Promise<U8Warehouse[]> {
+  return get('/u8/warehouses', signal ?? new AbortController().signal, '仓库列表读取失败')
+    .then((res: { warehouses: U8Warehouse[] }) => res.warehouses);
+}
+
+// PDA 扫码后实时拼 receipt 详情（UUID → 本系统 + U8）
+export type ReceiptU8Detail = {
+  detail_id: number;
+  po_id: number;
+  order_no: string;
+  purchase_date: string | null;
+  arrive_date: string | null;
+  inventory_code: string;
+  inventory_name: string;
+  spec: string | null;
+  quantity: number;
+  vendor_code: string | null;
+  vendor_name: string | null;
+};
+
+export type ReceiptWithDetail = {
+  receiptId: string;
+  poId: number;
+  rowId: number;
+  planNumber: string;
+  quantity: number;
+  printedBy: string;
+  createdAt: string;
+  u8: ReceiptU8Detail | null;
+};
+
+export function getReceiptWithDetail(
+  receiptId: string,
+  signal?: AbortSignal,
+): Promise<ReceiptWithDetail> {
+  return get(
+    `/purchase-arrival/receipts/${encodeURIComponent(receiptId)}`,
+    signal ?? new AbortController().signal,
+    '收货记录读取失败',
+  );
+}
+
+// 上架记录
 export type PutawayRecord = {
   id: string;
   receiptId: string;
@@ -207,7 +303,7 @@ export type PutawayRecord = {
   cancelledAt: string | null;
 };
 
-// 创建入库
+// 创建上架（按 receipt UUID + 货架 + 数量）
 export function createPutaway(params: {
   receiptId: string;
   locationCode: string;
@@ -217,43 +313,40 @@ export function createPutaway(params: {
   return write('/storage/putaway', 'POST', params);
 }
 
+// 实时 receipt 状态（包含已上架 / 剩余 + putaway 记录）
+export type ReceiptPutawayStatus = {
+  receiptId: string;
+  poId: number;
+  rowId: number;
+  planNumber: string;
+  quantity: number;
+  putawayQuantity: number;
+  remainingQuantity: number;
+  isFullyPutaway: boolean;
+  putawayRecords: PutawayRecord[];
+};
+
+export function getReceiptPutawayStatus(
+  receiptId: string,
+  signal?: AbortSignal,
+): Promise<ReceiptPutawayStatus> {
+  return get(
+    `/storage/receipts/${encodeURIComponent(receiptId)}/status`,
+    signal ?? new AbortController().signal,
+    '上架状态读取失败',
+  );
+}
+
 // 查询入库记录
-export function getPutaway(putawayId: string): Promise<PutawayRecord> {
-  return get(`/storage/putaway/${encodeURIComponent(putawayId)}`, new AbortController().signal, '入库记录读取失败');
+export function getPutaway(putawayId: string, signal?: AbortSignal): Promise<PutawayRecord> {
+  return get(
+    `/storage/putaway/${encodeURIComponent(putawayId)}`,
+    signal ?? new AbortController().signal,
+    '入库记录读取失败',
+  );
 }
 
 // 取消入库
 export function cancelPutaway(putawayId: string): Promise<{ cancelled: string }> {
   return write(`/storage/putaway/${encodeURIComponent(putawayId)}`, 'DELETE', {});
-}
-
-// 查询货位列表
-export type StorageLocation = {
-  id: string;
-  code: string;
-  name: string;
-  locationType: string;
-  isDefault: boolean;
-  departmentCode: string | null;
-};
-
-export function listStorageLocations(params?: {
-  locationType?: string;
-  departmentCode?: string;
-}): Promise<StorageLocation[]> {
-  const query = new URLSearchParams(params as Record<string, string>);
-  return get(`/storage/locations?${query}`, new AbortController().signal, '货位列表读取失败');
-}
-
-// 查询入库记录列表
-export function listPutaways(params?: {
-  receiptId?: string;
-  locationCode?: string;
-  page?: number;
-  pageSize?: number;
-}): Promise<{ items: PutawayRecord[]; total: number; page: number; pageSize: number }> {
-  const query = new URLSearchParams(
-    Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)]))
-  );
-  return get(`/storage/putaway?${query}`, new AbortController().signal, '入库记录列表读取失败');
 }
