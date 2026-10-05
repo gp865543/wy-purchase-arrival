@@ -28,6 +28,7 @@ const DB_NAME = 'wy-purchase-arrival';
 const DB_VERSION = 1;
 const STORE_LIST = 'po_summary';
 const STORE_DETAIL = 'po_detail';
+const STORE_PUTAWAY_LOG = 'putaway_log';
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -39,6 +40,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_DETAIL)) {
         db.createObjectStore(STORE_DETAIL, { keyPath: 'poId' });
+      }
+      if (!db.objectStoreNames.contains(STORE_PUTAWAY_LOG)) {
+        db.createObjectStore(STORE_PUTAWAY_LOG, { autoIncrement: true });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -138,6 +142,37 @@ export async function clearAll(): Promise<void> {
   try {
     await Promise.all([clearPoSummaries(), runTransaction(STORE_DETAIL, 'readwrite', s => s.clear())]);
   } catch { /* ignore */ }
+}
+
+export interface PutawayLogEntry {
+  receiptId: string;
+  receiptSummary: string;
+  warehouseName: string;
+  locationCode: string;
+  quantity: number;
+  submittedAt: number;
+}
+
+// 进仓累计台账：append-only），刷新页面保留
+export async function cachePutawayLog(entries: PutawayLogEntry[]): Promise<void> {
+  if (!entries.length) return;
+  try {
+    await openDb().then(db => new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(STORE_PUTAWAY_LOG, 'readwrite');
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+      try {
+        const store = transaction.objectStore(STORE_PUTAWAY_LOG);
+        for (const e of entries) store.add(e);
+      } catch (cause) { reject(cause); }
+      transaction.commit();
+    }));
+  } catch { /* IDB 不可用静默降级 */ }
+}
+
+export async function loadPutawayLog(): Promise<PutawayLogEntry[]> {
+  return getAll<PutawayLogEntry>(STORE_PUTAWAY_LOG);
 }
 
 export type { PoSummary, PoDetail };

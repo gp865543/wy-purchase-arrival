@@ -24,6 +24,7 @@ import {
 } from '../api';
 import { initShell, onScan } from '../shell';
 import { leaveToPortal } from '../portal';
+import { cachePutawayLog, loadPutawayLog } from '../storage/idb';
 
 // 状态机：scan-receipt → select-warehouse → enter-location → success
 type PageState = 'scan-receipt' | 'select-warehouse' | 'enter-location' | 'success';
@@ -49,6 +50,18 @@ interface PendingBatch {
 }
 const pendingBatches = ref<PendingBatch[]>([]);
 
+// 已入库记录（session 内累计，存 IndexedDB 跨刷新持久）。
+// 仓库员下工能看到这次进仓扫过哪些 receipt、什么货架、数量、时间。
+interface PutawayLogEntry {
+  receiptId: string;
+  receiptSummary: string;     // OrderNo 库存员看见的最多 PO
+  warehouseName: string;
+  locationCode: string;
+  quantity: number;
+  submittedAt: number;        // 时间戳
+}
+const putawayLogs = ref<PutawayLogEntry[]>([]);
+
 // 单次输入的货架号 + 数量
 const currentLocationCode = ref('');
 const currentQuantity = ref<number | ''>('');
@@ -71,6 +84,8 @@ onMounted(async () => {
   initShell();
   unsubscribeScan = onScan(handleScan);
   await loadWarehouses();
+  // 恢复本次进仓累计入库记录（从 IndexedDB）
+  putawayLogs.value = await loadPutawayLog();
 });
 
 onUnmounted(() => {
@@ -209,6 +224,7 @@ async function submitPutaway() {
   }
   loading.value = true;
   try {
+    const submittedAt = Date.now();
     for (const batch of pendingBatches.value) {
       await createPutaway({
         receiptId: receipt.value.receiptId,
@@ -216,6 +232,18 @@ async function submitPutaway() {
         quantity: batch.quantity,
         isLineSide: false,
       });
+      // 累计到本次进仓入库台账（与后端 storage_putaway 表记录同步）
+      const entry: PutawayLogEntry = {
+        receiptId: receipt.value.receiptId,
+        receiptSummary: receipt.value.u8?.order_no ?? String(receipt.value.poId),
+        warehouseName: selectedWarehouse.value?.name ?? '',
+        locationCode: batch.locationCode,
+        quantity: batch.quantity,
+        submittedAt,
+      };
+      putawayLogs.value.push(entry);
+      // 立即写 IndexedDB（不依赖后端，仓库员下工前都看得到）
+      void cachePutawayLog([entry]);
     }
     // 重新拉 status
     const status = await getReceiptPutawayStatus(receipt.value.receiptId);
@@ -234,6 +262,12 @@ async function submitPutaway() {
 // ---------- 流程控制 ----------
 function goBack() {
   leaveToPortal();
+}
+
+function clearPutawayLog() {
+  putawayLogs.value = [];
+  void cachePutawayLog([]);  // 写入空触发 IDB 覆盖
+  Toast({ message: '已清空本次入库记录', theme: 'success', duration: 1200, preventScrollThrough: false });
 }
 
 function restart() {
@@ -403,6 +437,27 @@ const remainingAfterBatch = computed(() => remainingQuantity.value - totalBatche
     </div>
 
     <!-- 状态 4: 入库成功 -->
+    <!-- 已入库台账：本次进仓扫过的每条独立 receipt，刷新页面仍可看到（来自本地 idb） -->
+    <section v-if="putawayLogs.length" class="putaway-log">
+      <div class="putaway-log-header">
+        <h3>本次进仓入库记录 ({{ putawayLogs.length }} 条)</h3>
+        <Button size="small" variant="outline" @click="clearPutawayLog">清空记录</Button>
+      </div>
+      <div class="putaway-log-list">
+        <div v-for="(entry, idx) in putawayLogs" :key="idx" class="putaway-log-row">
+          <div class="row-line">
+            <Tag>{{ entry.warehouseName || '仓库未指定' }}</Tag>
+            <span class="row-loc">{{ entry.locationCode }}</span>
+            <span class="row-qty">{{ entry.quantity }} 件</span>
+          </div>
+          <div class="row-meta">
+            <span>订单 {{ entry.receiptSummary }}</span>
+            <span>{{ new Date(entry.submittedAt).toLocaleString() }}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <div v-if="currentState === 'success'" class="state-container">
       <div class="success-prompt">
         <div class="success-icon">✅</div>
@@ -563,6 +618,54 @@ const remainingAfterBatch = computed(() => remainingQuantity.value - totalBatche
   margin-top: 8px;
 }
 
+.putaway-log {
+  background: var(--td-bg-color-container);
+  border-radius: var(--td-radius-large);
+  padding: var(--td-spacer-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--td-spacer-2);
+}
+.putaway-log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.putaway-log-header h3 {
+  margin: 0;
+  font-size: var(--td-font-size-title-small);
+}
+.putaway-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--td-spacer-2);
+}
+.putaway-log-row {
+  padding: var(--td-spacer-2);
+  background: var(--td-bg-color-page);
+  border-radius: var(--td-radius-default);
+  display: flex;
+  flex-direction: column;
+  gap: var(--td-spacer-1);
+}
+.putaway-log-row .row-line {
+  display: flex;
+  align-items: center;
+  gap: var(--td-spacer-2);
+}
+.putaway-log-row .row-loc {
+  font-weight: 600;
+}
+.putaway-log-row .row-qty {
+  margin-left: auto;
+  color: var(--td-success-color);
+}
+.putaway-log-row .row-meta {
+  display: flex;
+  justify-content: space-between;
+  color: var(--td-text-color-secondary);
+  font-size: var(--td-font-size-body-small);
+}
 .success-prompt {
   text-align: center;
   padding: 60px 20px;
