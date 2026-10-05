@@ -346,39 +346,14 @@ const remainingAfterBatch = computed(() => remainingQuantity.value - totalBatche
     <div v-if="currentState === 'select-warehouse' && receipt" class="state-container">
       <div class="receipt-card">
         <div class="receipt-card-title">收货记录</div>
-        <Cell
-          title="订单号"
-          :content="receipt.u8?.order_no || String(receipt.poId)"
-        />
-        <Cell
-          title="物品"
-          :content="receipt.u8?.inventory_name || '—'"
-        />
-        <Cell
-          title="规格"
-          :content="receipt.u8?.spec || '—'"
-        />
-        <Cell
-          title="采购日期"
-          :content="receipt.u8?.purchase_date ? receipt.u8.purchase_date.slice(0, 10) : '—'"
-        />
-        <Cell
-          title="到货日期"
-          :content="receipt.u8?.arrive_date ? receipt.u8.arrive_date.slice(0, 10) : '—'"
-        />
-        <Cell
-          title="本次到货数量"
-          :content="`${receipt.quantity} 件`"
-        />
-        <Cell
-          title="已上架 / 剩余"
-          :content="`${putawayQuantity} / ${remainingQuantity} 件`"
-        />
-        <Cell
-          v-if="receipt.u8?.vendor_name"
-          title="供应商"
-          :content="receipt.u8.vendor_name"
-        />
+        <Cell title="订单号">{{ receipt.u8?.order_no || String(receipt.poId) }}</Cell>
+        <Cell title="物品">{{ receipt.u8?.inventory_name || '—' }}</Cell>
+        <Cell title="规格">{{ receipt.u8?.spec || '—' }}</Cell>
+        <Cell title="采购日期">{{ receipt.u8?.purchase_date ? receipt.u8.purchase_date.slice(0, 10) : '—' }}</Cell>
+        <Cell title="到货日期">{{ receipt.u8?.arrive_date ? receipt.u8.arrive_date.slice(0, 10) : '—' }}</Cell>
+        <Cell title="本次到货数量">{{ `${receipt.quantity} 件` }}</Cell>
+        <Cell title="已上架 / 剩余">{{ `${putawayQuantity} / ${remainingQuantity} 件` }}</Cell>
+        <Cell v-if="receipt.u8?.vendor_name" title="供应商">{{ receipt.u8.vendor_name }}</Cell>
       </div>
 
       <div class="action-buttons">
@@ -392,24 +367,12 @@ const remainingAfterBatch = computed(() => remainingQuantity.value - totalBatche
     <div v-if="currentState === 'enter-location' && receipt && selectedWarehouse" class="state-container">
       <div class="receipt-card">
         <div class="receipt-card-title">收货记录</div>
-        <Cell
-          title="订单号"
-          :content="receipt.u8?.order_no || String(receipt.poId)"
-        />
-        <Cell
-          title="物品"
-          :content="receipt.u8?.inventory_name || '—'"
-        />
-        <Cell
-          title="采购日期"
-          :content="receipt.u8?.purchase_date ? receipt.u8.purchase_date.slice(0, 10) : '—'"
-        />
-        <Cell
-          title="到货日期"
-          :content="receipt.u8?.arrive_date ? receipt.u8.arrive_date.slice(0, 10) : '—'"
-        />
-        <Cell title="本次到货数量" :content="`${receipt.quantity} 件`" />
-        <Cell title="已上架 / 剩余" :content="`${putawayQuantity} / ${remainingQuantity} 件`" />
+        <Cell title="订单号">{{ receipt.u8?.order_no || String(receipt.poId) }}</Cell>
+        <Cell title="物品">{{ receipt.u8?.inventory_name || '—' }}</Cell>
+        <Cell title="采购日期">{{ receipt.u8?.purchase_date ? receipt.u8.purchase_date.slice(0, 10) : '—' }}</Cell>
+        <Cell title="到货日期">{{ receipt.u8?.arrive_date ? receipt.u8.arrive_date.slice(0, 10) : '—' }}</Cell>
+        <Cell title="本次到货数量">{{ `${receipt.quantity} 件` }}</Cell>
+        <Cell title="已上架 / 剩余">{{ `${putawayQuantity} / ${remainingQuantity} 件` }}</Cell>
       </div>
 
       <div class="warehouse-info">
