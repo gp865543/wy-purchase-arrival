@@ -144,6 +144,12 @@ async function loadReceipt(receiptId: string) {
   try {
     // 1) receipt 详情是必须的：拿不到就拒绝进入下一步。
     const info = await getReceiptWithDetail(receiptId);
+    console.log('[DIAG:loadReceipt]', {
+      receiptId,
+      keys: Object.keys(info || {}),
+      u8_keys: info?.u8 ? Object.keys(info.u8) : null,
+      u8_inventory_name: info?.u8?.inventory_name,
+    });
     receipt.value = info;
     pendingBatches.value = [];
     currentState.value = 'select-warehouse';
