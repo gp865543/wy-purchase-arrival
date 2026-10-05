@@ -10,10 +10,11 @@ const props = defineProps<{
   pathname?: string;
 }>();
 
-// 取 /apps/purchase-arrival/ 后面的 path（去掉尾部斜杠）。
+// 取 /apps/purchase-arrival/ 后面的 path 段（剥掉 query 与尾斜杠，避免 portal_entry 等
+// 把 activePage 撑成 "putaway?portal_entry=/pda" 导致模板 fallthrough）。
 const activePage = computed(() => {
-  const p = (props.pathname ?? '').replace(/^\/?apps\/purchase-arrival\/?/, '').replace(/\/$/, '');
-  return p;
+  const pathOnly = (props.pathname ?? '').split('?')[0] ?? '';
+  return pathOnly.replace(/^\/?apps\/purchase-arrival\/?/, '').replace(/\/$/, '');
 });
 </script>
 
