@@ -233,3 +233,120 @@ export function savePrintResult(operationId: string, result: PrintResult): Promi
 export function getPrintCounts(poId: number, signal: AbortSignal): Promise<{ counts: Record<number, number> }> {
   return get(`/purchase-arrival/purchase-orders/${encodeURIComponent(poId)}/print-counts`, signal, '打印次数读取失败，请重试');
 }
+
+// ====== 采购入库扫码 (Storage Putaway) ======
+// Issue #72: PDA 扫码入库。
+// H5 标签 QR 编码 = PurchaseArrivalReceipt.id（UUID 字符串）。
+// 后端按 UUID 查本系统 receipts 拿 (poId, rowId, planNumber, quantity)；
+// 再按 (poId, rowId) 实时调 U8 拿物品名 / 采购日期 / 到货日期 / 规格 / 供应商。
+
+// U8 仓库（从 U8 Warehouse 主表实时取）
+export type U8Warehouse = {
+  code: string;
+  name: string;
+  address: string;
+  person: string;
+  enabled: boolean;
+};
+
+export function listWarehouses(signal?: AbortSignal): Promise<U8Warehouse[]> {
+  return get('/u8/warehouses', signal ?? new AbortController().signal, '仓库列表读取失败')
+    .then((res: { warehouses: U8Warehouse[] }) => res.warehouses);
+}
+
+// PDA 扫码后实时拼 receipt 详情（UUID → 本系统 + U8）
+export type ReceiptU8Detail = {
+  detail_id: number;
+  po_id: number;
+  order_no: string;
+  purchase_date: string | null;
+  arrive_date: string | null;
+  inventory_code: string;
+  inventory_name: string;
+  spec: string | null;
+  quantity: number;
+  vendor_code: string | null;
+  vendor_name: string | null;
+};
+
+export type ReceiptWithDetail = {
+  receiptId: string;
+  poId: number;
+  rowId: number;
+  planNumber: string;
+  quantity: number;
+  printedBy: string;
+  createdAt: string;
+  u8: ReceiptU8Detail | null;
+};
+
+export function getReceiptWithDetail(
+  receiptId: string,
+  signal?: AbortSignal,
+): Promise<ReceiptWithDetail> {
+  return get(
+    `/purchase-arrival/receipts/${encodeURIComponent(receiptId)}`,
+    signal ?? new AbortController().signal,
+    '收货记录读取失败',
+  );
+}
+
+// 上架记录
+export type PutawayRecord = {
+  id: string;
+  receiptId: string;
+  locationCode: string;
+  quantity: number;
+  isLineSide: boolean;
+  operatorId: string;
+  createdAt: string;
+  cancelledAt: string | null;
+};
+
+// 创建上架（按 receipt UUID + 货架 + 数量）
+export function createPutaway(params: {
+  receiptId: string;
+  locationCode: string;
+  quantity: number;
+  isLineSide?: boolean;
+}): Promise<PutawayRecord> {
+  return write('/storage/putaway', 'POST', params);
+}
+
+// 实时 receipt 状态（包含已上架 / 剩余 + putaway 记录）
+export type ReceiptPutawayStatus = {
+  receiptId: string;
+  poId: number;
+  rowId: number;
+  planNumber: string;
+  quantity: number;
+  putawayQuantity: number;
+  remainingQuantity: number;
+  isFullyPutaway: boolean;
+  putawayRecords: PutawayRecord[];
+};
+
+export function getReceiptPutawayStatus(
+  receiptId: string,
+  signal?: AbortSignal,
+): Promise<ReceiptPutawayStatus> {
+  return get(
+    `/storage/receipts/${encodeURIComponent(receiptId)}/status`,
+    signal ?? new AbortController().signal,
+    '上架状态读取失败',
+  );
+}
+
+// 查询入库记录
+export function getPutaway(putawayId: string, signal?: AbortSignal): Promise<PutawayRecord> {
+  return get(
+    `/storage/putaway/${encodeURIComponent(putawayId)}`,
+    signal ?? new AbortController().signal,
+    '入库记录读取失败',
+  );
+}
+
+// 取消入库
+export function cancelPutaway(putawayId: string): Promise<{ cancelled: string }> {
+  return write(`/storage/putaway/${encodeURIComponent(putawayId)}`, 'DELETE', {});
+}
