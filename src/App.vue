@@ -10,12 +10,23 @@ const props = defineProps<{
   pathname?: string;
 }>();
 
+// === DIAG LOG（在浏览器 Console 看到）
+console.log('[DIAG:App.vue] props.pathname =', JSON.stringify(props.pathname));
+
 // 取 /apps/purchase-arrival/ 后面的 path 段（剥掉 query 与尾斜杠，避免 portal_entry 等
 // 把 activePage 撑成 "putaway?portal_entry=/pda" 导致模板 fallthrough）。
 const activePage = computed(() => {
   const pathOnly = (props.pathname ?? '').split('?')[0] ?? '';
-  return pathOnly.replace(/^\/?apps\/purchase-arrival\/?/, '').replace(/\/$/, '');
+  const stripped = pathOnly.replace(/^\/?apps\/purchase-arrival\/?/, '').replace(/\/$/, '');
+  console.log('[DIAG:App.vue] activePage compute:', {
+    'window.location.pathname': window.location.pathname,
+    'props.pathname': props.pathname,
+    'pathOnly': pathOnly,
+    'stripped': stripped,
+  });
+  return stripped;
 });
+console.log('[DIAG:App.vue] initial activePage =', JSON.stringify(activePage.value));
 </script>
 
 <template>
