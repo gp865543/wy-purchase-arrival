@@ -4,7 +4,7 @@ import vue from '@vitejs/plugin-vue';
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
   return {
-    base: env.VITE_BASE || '/apps/purchase-arrival/',
+    base: env.VITE_BASE || '/' ,
     plugins: [vue(), {
       name: 'omit-dependency-sourcemaps',
       apply: 'serve',
@@ -15,6 +15,7 @@ export default defineConfig(({ mode }) => {
       },
     }],
     build: { target: 'es2020' },
+    appType: 'spa',
     server: {
       proxy: {
         '/api/v1/purchase-arrival': {
