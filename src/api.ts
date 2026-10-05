@@ -1,7 +1,7 @@
 // 业务接口骨架。
 //
 // 当前文件只定义"路径约定 + 类型契约 + 路由占位"，调用形态（AbortSignal / 401 跳登录 / CSRF 写入）
-// 克隆自 wy-material-print/src/api.ts，业务端点改为采购到货收货专用路径。
+// 克隆自 wy-material-print/src/api.ts，业务端点改为采购收货专用路径。
 //
 // 后端在 wy-fastapi/portal_identity/purchase_arrival.py 落地前，本文件返回的 Promise 永远不会被
 // 真实解析；前端只走骨架视图。完整业务实现列入 ADR0011 与后续 Issue。
@@ -234,7 +234,7 @@ export function getPrintCounts(poId: number, signal: AbortSignal): Promise<{ cou
   return get(`/purchase-arrival/purchase-orders/${encodeURIComponent(poId)}/print-counts`, signal, '打印次数读取失败，请重试');
 }
 
-// ====== 采购入库扫码 (Storage Putaway) ======
+// ====== 采购入库 (Storage Putaway) ======
 // Issue #72: PDA 扫码入库。
 // H5 标签 QR 编码 = PurchaseArrivalReceipt.id（UUID 字符串）。
 // 后端按 UUID 查本系统 receipts 拿 (poId, rowId, planNumber, quantity)；

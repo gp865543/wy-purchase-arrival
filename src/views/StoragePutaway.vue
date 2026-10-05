@@ -1,11 +1,11 @@
 <script setup lang="ts">
 /**
- * StoragePutaway.vue - 采购入库扫码页面
+ * StoragePutaway.vue - 采购入库页面
  *
- * Issue #72 (2026-09-30): PDA 采购入库扫码 UI
+ * Issue #72 (2026-09-30): PDA 采购入库 UI
  *
  * 业务流程：
- * 1. 仓库操作员扫"采购到货收货"标签 QR（编码 = PurchaseArrivalReceipt.id = UUID）；
+ * 1. 仓库操作员扫"采购收货"标签 QR（编码 = PurchaseArrivalReceipt.id = UUID）；
  * 2. 后端按 UUID 查 receipts 表 + 实时调 U8 拼详情（物品名、采购日期、到货日期、规格、供应商）；
  * 3. 操作员手动从 U8 Warehouse 主表选仓库，手动填货架号和上架数量；
  * 4. 重复 2-3 直至全部上架完成（累计 <= receipt.quantity）；
@@ -314,7 +314,7 @@ const remainingAfterBatch = computed(() => remainingQuantity.value - totalBatche
       <div class="scan-prompt">
         <div class="scan-icon">📦</div>
         <h2>扫描收货标签</h2>
-        <p>将 PDA 镜头对准"采购到货收货"标签右下角二维码；扫码后自动获取物品信息。</p>
+        <p>将 PDA 镜头对准"采购收货"标签右下角二维码；扫码后自动获取物品信息。</p>
         <p v-if="lastScanError" class="error-text">{{ lastScanError }}</p>
         <p v-else-if="lastScanCode" class="hint-text">最近扫码：{{ lastScanCode }}</p>
         <p v-else class="hint-text">在浏览器中扫码无效，请使用 PDA 设备</p>
