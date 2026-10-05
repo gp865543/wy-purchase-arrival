@@ -12,6 +12,7 @@ import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { Button, Empty, Loading, Navbar, Search, Tag } from 'tdesign-mobile-vue';
 import { listPurchaseOrders, getSummary, type PurchaseOrder } from '../api';
 import { leaveToPortal } from '../portal';
+import { loadPoSummaries, cachePoSummaries } from '../storage/idb';
 import PurchaseOrderDetail from './PurchaseOrderDetail.vue';
 
 const activeOrder = ref<PurchaseOrder>();
@@ -58,6 +59,18 @@ async function loadPlans(reset = false) {
     items.value = reset ? result.items : [...items.value, ...result.items];
     total.value = result.total;
     page.value = result.page;
+    // 第一次成功的全量拉取写回 IndexedDB（仅 reset 路径，避免每页都覆盖）
+    if (reset) {
+      void cachePoSummaries(result.items.map(item => ({
+        poId: item.poId,
+        orderNo: item.orderNo,
+        vendorCode: item.vendorCode,
+        vendorName: item.vendorName,
+        departmentCode: item.departmentCode,
+        departmentName: item.departmentName,
+        orderDate: item.orderDate,
+      })));
+    }
   } catch (cause) {
     if (!request.signal.aborted && requestId === planRequestId) error.value = cause instanceof Error ? cause.message : '采购订单读取失败，请重试';
   } finally {
@@ -82,9 +95,15 @@ async function loadSummary() {
   }
 }
 
-function refresh() {
-  void loadPlans(true);
-  void loadSummary();
+async function refresh() {
+  // 1. 先把 IndexedDB 缓存里的列表加载出来显示（冷启动秒开）
+  const cached = await loadPoSummaries();
+  if (cached.length) {
+    items.value = cached.map(({ fetchedAt: _fa, ...rest }) => rest as PurchaseOrder);
+    total.value = items.value.length;
+  }
+  // 2. 再异步拉远端，远端响应后覆盖 + 写回缓存
+  await Promise.all([loadPlans(true), loadSummary()]);
 }
 
 watch(keyword, () => {

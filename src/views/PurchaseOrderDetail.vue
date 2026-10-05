@@ -18,6 +18,7 @@ import { getPurchaseOrder, getPrintCounts, createReceipts, updateReceipt, type A
 import PrintPreview from './PrintPreview.vue';
 import PoArrivalDevTools from './PoArrivalDevTools.vue';
 import { usePageBack } from '../pageBack';
+import { loadPoDetail, cachePoDetail } from '../storage/idb';
 
 const props = defineProps<{ order: PurchaseOrder }>();
 const emit = defineEmits<{ back: [] }>();
@@ -377,6 +378,17 @@ async function load() {
   // 根据后端 receipts 重建 frozenRows — 已存行都是 frozen。没保存过（无 receipts）的行
   // 不在 set 里，会走"草稿"路径。
   frozenRows.value = new Set();
+  // 1. 先看本地缓存 — 离线 / 弱网立即显示
+  const cached = await loadPoDetail(props.order.poId);
+  if (cached) {
+    details.value = cached.detail as PurchaseOrderDetailRow[];
+    for (const item of details.value) {
+      if ((item.receipts ?? []).length) frozenRows.value.add(item.rowId);
+    }
+    details.value.forEach(item => ensureAllocRow(item.rowId));
+    loading.value = false;
+  }
+  // 2. 异步拉远端，覆盖本地 receipts / detail；写回缓存
   try {
     const result = await getPurchaseOrder(props.order.poId, request.signal);
     if (!request.signal.aborted) {
@@ -387,6 +399,7 @@ async function load() {
       details.value.forEach(item => {
         ensureAllocRow(item.rowId);
       });
+      void cachePoDetail(props.order.poId, result.details, result.details.flatMap(d => d.receipts ?? []));
     }
   } catch (cause) {
     if (!request.signal.aborted) error.value = cause instanceof Error ? cause.message : '订单明细读取失败，请重试';
