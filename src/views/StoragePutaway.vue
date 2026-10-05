@@ -76,6 +76,9 @@ const lastScanError = ref('');
 // 当前扫码码（用于 UI 显示，方便用户看是否被 PDA 接收）
 const lastScanCode = ref('');
 
+// 开发 / 调试用：手动输入 receipt UUID（绕过 PDA 扫码）
+const manualReceiptId = ref('');
+
 // ---------- 初始化 ----------
 let unsubscribeScan: (() => void) | undefined;
 let warehouseAbort: AbortController | undefined;
@@ -309,6 +312,27 @@ const remainingAfterBatch = computed(() => remainingQuantity.value - totalBatche
         <p v-if="lastScanError" class="error-text">{{ lastScanError }}</p>
         <p v-else-if="lastScanCode" class="hint-text">最近扫码：{{ lastScanCode }}</p>
         <p v-else class="hint-text">在浏览器中扫码无效，请使用 PDA 设备</p>
+
+        <!-- 开发 / 调试：手动输入 receipt UUID（PDA 镜头扫不到时） -->
+        <div class="manual-scan">
+          <p class="hint-text">或手动输入 receipt UUID 测试：</p>
+          <div class="manual-scan-row">
+            <Input
+              v-model="manualReceiptId"
+              placeholder="receipt UUID（开发用）"
+              :maxlength="64"
+              aria-label="receipt UUID"
+            />
+            <Button
+              theme="primary"
+              size="small"
+              :disabled="!manualReceiptId.trim()"
+              @click="handleScan(manualReceiptId.trim())"
+            >
+              加载
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -521,6 +545,20 @@ const remainingAfterBatch = computed(() => remainingQuantity.value - totalBatche
   margin: 0 0 12px;
 }
 
+.manual-scan {
+  margin-top: var(--td-spacer-2);
+  padding-top: var(--td-spacer-2);
+  border-top: 1px dashed var(--td-component-border);
+}
+.manual-scan-row {
+  display: flex;
+  gap: var(--td-spacer-1);
+  align-items: center;
+}
+.manual-scan-row :deep(.t-input) {
+  flex: 1;
+  min-width: 0;
+}
 .error-text {
   color: #d63031;
 }
