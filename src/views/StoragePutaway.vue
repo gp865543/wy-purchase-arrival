@@ -30,6 +30,9 @@ import { cachePutawayLog, loadPutawayLog } from '../storage/idb';
 type PageState = 'scan-receipt' | 'select-warehouse' | 'enter-location' | 'success';
 
 const currentState = ref<PageState>('scan-receipt');
+// 仅 dev 环境渲染手动 UUID 输入；产线隐藏。贛调试口。
+// 注：Vue 模板的表达式解析器不能识别 import.meta，必须在 script 里提前赋值后通过变量使用。
+const isDev = import.meta.env.DEV;
 
 // 从本系统 + U8 实时拼出的 receipt 详情
 const receipt = ref<ReceiptWithDetail | null>(null);
@@ -337,7 +340,7 @@ const remainingAfterBatch = computed(() => remainingQuantity.value - totalBatche
         <p v-else class="hint-text">在浏览器中扫码无效，请使用 PDA 设备</p>
 
         <!-- 开发 / 调试：手动输入 receipt UUID（PDA 镜头扫不到时）。仅 dev 模式渲染。 -->
-        <div v-if="import.meta.env.DEV" class="manual-scan">
+        <div v-if="isDev" class="manual-scan">
           <p class="hint-text">或手动输入 receipt UUID 测试：</p>
           <div class="manual-scan-row">
             <Input
