@@ -4,7 +4,7 @@ import vue from '@vitejs/plugin-vue';
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
   return {
-    base: env.VITE_BASE || '/' ,
+    base: env.VITE_BASE || '/apps/purchase-arrival/' ,
     plugins: [vue(), {
       name: 'omit-dependency-sourcemaps',
       apply: 'serve',

@@ -336,8 +336,8 @@ const remainingAfterBatch = computed(() => remainingQuantity.value - totalBatche
         <p v-else-if="lastScanCode" class="hint-text">最近扫码：{{ lastScanCode }}</p>
         <p v-else class="hint-text">在浏览器中扫码无效，请使用 PDA 设备</p>
 
-        <!-- 开发 / 调试：手动输入 receipt UUID（PDA 镜头扫不到时） -->
-        <div class="manual-scan">
+        <!-- 开发 / 调试：手动输入 receipt UUID（PDA 镜头扫不到时）。仅 dev 模式渲染。 -->
+        <div v-if="import.meta.env.DEV" class="manual-scan">
           <p class="hint-text">或手动输入 receipt UUID 测试：</p>
           <div class="manual-scan-row">
             <Input
