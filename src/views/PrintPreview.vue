@@ -148,9 +148,15 @@ async function print() {
         operator: operator.value,
         operatedAt: operatedAt.value,
         allocationQuantity: item.quantity,
+        // 二维码内容 = receipt.id（UUID）优先；否则回退 detail.rowId。
+        // 以前缺参→实际打出的是 rowId，StoragePutaway 扫码只接受 UUID，标签进不了上架流。
+        receiptId: item.receiptId,
+        // 采购日期（PO 头部字段）供标签面板输出，以前未传→产出空。
+        purchaseDate: props.order.orderDate,
       }));
       let confirmed = 0;
       stage.value = `正在打印 0/${commands.length}`;
+      console.log('[PrintPreview] calling sendLabels, commands:', commands.length, 'deviceId:', snapshot.deviceId);
       await sendLabels(snapshot, commands, completed => {
         for (const page of result.value!.pages.slice(confirmed, completed)) {
           page.status = 'sent';
@@ -164,20 +170,27 @@ async function print() {
       const pending = result.value.pages.find(page => page.status === 'pending');
       if (pending) { pending.status = 'error'; pending.error = error.value; }
     }
+    console.log('[PrintPreview] sendLabels finished, error:', error.value);
     await persist();
     if (!error.value) stage.value = '打印完成，请核对出纸';
   } catch (cause) { error.value = cause instanceof Error ? cause.message : '打印失败，请重试'; }
   finally { busy.value = false; batchNotice.value = ''; }
 }
 function leave(event: BeforeUnloadEvent) { if (locked.value) { event.preventDefault(); event.returnValue = ''; } }
-async function refreshConnection() {
+async function refreshConnection(retries = 3) {
   if (document.visibilityState !== 'visible' || busy.value || readingSettings.value) return;
   readingSettings.value = true;
   device.value = undefined;
   error.value = '';
+  console.log('[PrintPreview] refreshConnection attempt', 4 - retries);
   try {
     const snapshot = await deviceSnapshot().catch(() => undefined);
-    if (snapshot) { labelSize(snapshot.settings); device.value = snapshot; }
+    if (snapshot) { labelSize(snapshot.settings); device.value = snapshot; console.log('[PrintPreview] device ready:', snapshot.deviceId); }
+    else if (retries > 0) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      readingSettings.value = false;
+      return refreshConnection(retries - 1);
+    }
   } catch (cause) { if (connected.value) error.value = cause instanceof Error ? cause.message : '设备参数读取失败'; }
   finally { readingSettings.value = false; }
 }

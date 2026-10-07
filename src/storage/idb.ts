@@ -154,8 +154,10 @@ export interface PutawayLogEntry {
 }
 
 // 进仓累计台账：append-only），刷新页面保留
+// 重要：传空数组表示「清空整个本地进仓记录」，必须真正落到 objectStore.clear()，
+// 不能像 append-only 那样提前 return —— 否则仓库员 UI 上“清空记录”按钮只是删了内存，
+// 下次刷新记录又冒出来。
 export async function cachePutawayLog(entries: PutawayLogEntry[]): Promise<void> {
-  if (!entries.length) return;
   try {
     await openDb().then(db => new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(STORE_PUTAWAY_LOG, 'readwrite');
@@ -164,7 +166,11 @@ export async function cachePutawayLog(entries: PutawayLogEntry[]): Promise<void>
       transaction.onabort = () => reject(transaction.error);
       try {
         const store = transaction.objectStore(STORE_PUTAWAY_LOG);
-        for (const e of entries) store.add(e);
+        if (!entries.length) {
+          store.clear();
+        } else {
+          for (const e of entries) store.add(e);
+        }
       } catch (cause) { reject(cause); }
       transaction.commit();
     }));

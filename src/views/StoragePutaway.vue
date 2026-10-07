@@ -199,9 +199,11 @@ function confirmBatch() {
     Toast({ message: '请填写正确的上架数量', theme: 'warning' });
     return;
   }
-  if (qty > remainingQuantity.value) {
+  // 累计校验：多次上架时要考虑本单已累加的其他批次（pendingBatches）。以前只检查 qty > remainingQuantity，6 + 6 = 12 会被接受，上架量可能超出订单。
+  if (qty + totalBatchedQuantity.value > remainingQuantity.value) {
+    const remainingAfter = remainingQuantity.value - totalBatchedQuantity.value;
     Toast({
-      message: `超过剩余可上架数量 ${remainingQuantity.value} 件`,
+      message: `本单剩余可上架 ${Math.max(remainingAfter, 0)} 件，请减少本批数量或先提交已有批次`,
       theme: 'warning',
     });
     return;
@@ -232,15 +234,24 @@ async function submitPutaway() {
     return;
   }
   loading.value = true;
+  const submittedAt = Date.now();
+  // 记录成功提交的 batch 在 pendingBatches 里的下标：失败时只从 pendingBatches 里剖掉已成功的，未提交的保留在原位上以便重试。以前遇到第一个错误就抛出，retry 会重新提交所有 batch ——后端接受重复提交会造成重复入库、数量凘变、上架超量。
+  const submittedIndices: number[] = [];
+  let firstError: string | null = null;
   try {
-    const submittedAt = Date.now();
-    for (const batch of pendingBatches.value) {
-      await createPutaway({
-        receiptId: receipt.value.receiptId,
-        locationCode: batch.locationCode,
-        quantity: batch.quantity,
-        isLineSide: false,
-      });
+    for (let i = 0; i < pendingBatches.value.length; i++) {
+      const batch = pendingBatches.value[i]!;
+      try {
+        await createPutaway({
+          receiptId: receipt.value.receiptId,
+          locationCode: batch.locationCode,
+          quantity: batch.quantity,
+          isLineSide: false,
+        });
+      } catch (batchErr) {
+        firstError = batchErr instanceof Error ? batchErr.message : '入库失败，请重试';
+        break;
+      }
       // 累计到本次进仓入库台账（与后端 storage_putaway 表记录同步）
       const entry: PutawayLogEntry = {
         receiptId: receipt.value.receiptId,
@@ -253,19 +264,25 @@ async function submitPutaway() {
       putawayLogs.value.push(entry);
       // 立即写 IndexedDB（不依赖后端，仓库员下工前都看得到）
       void cachePutawayLog([entry]);
+      submittedIndices.push(i);
     }
-    // 重新拉 status
-    const status = await getReceiptPutawayStatus(receipt.value.receiptId);
-    putawayQuantity.value = status.putawayQuantity;
-    remainingQuantity.value = status.remainingQuantity;
-    currentState.value = 'success';
-    Toast({ message: '入库成功', theme: 'success' });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : '入库失败，请重试';
-    Toast({ message: msg, theme: 'error' });
   } finally {
+    // 倒序剖除已成功 batch（保持下标不变）
+    for (let i = submittedIndices.length - 1; i >= 0; i--) {
+      pendingBatches.value.splice(submittedIndices[i]!, 1);
+    }
     loading.value = false;
   }
+  if (firstError) {
+    Toast({ message: firstError, theme: 'error' });
+    return;
+  }
+  // 全部成功：刷新 status + 跳 success
+  const status = await getReceiptPutawayStatus(receipt.value.receiptId);
+  putawayQuantity.value = status.putawayQuantity;
+  remainingQuantity.value = status.remainingQuantity;
+  currentState.value = 'success';
+  Toast({ message: '入库成功', theme: 'success' });
 }
 
 // ---------- 流程控制 ----------
@@ -632,6 +649,9 @@ const remainingAfterBatch = computed(() => remainingQuantity.value - totalBatche
   display: flex;
   flex-direction: column;
   gap: var(--td-spacer-2);
+  /* 防止 tdesign-mobile-vue 的 Navbar position:fixed 把“清空记录”按钮遮住 —— 加进一个 stacking context。*/
+  position: relative;
+  z-index: 1;
 }
 .putaway-log-header {
   display: flex;
