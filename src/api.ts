@@ -64,6 +64,7 @@ export type PurchaseOrderDetail = {
   sumMoney: number;
   arriveDate: string | null;
   memo: string;
+  unitName?: string;        // 来自 U8 PO_PODetails.cUnitID / ComputationUnit.cComUnitName
 };
 
 // 标签预览（移动端无"实发数量"录入，按订单数量直接进入打印）。

@@ -13,7 +13,6 @@
 
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { Button, Checkbox, Empty, Input, Loading, Message, Navbar, Search, Tag, Toast } from 'tdesign-mobile-vue';
-import CloseIcon from 'tdesign-icons-vue-next/esm/components/close';
 import { getPurchaseOrder, getPrintCounts, createReceipts, updateReceipt, type Allocation, type PurchaseOrder, type PurchaseOrderDetailRow, type Receipt } from '../api';
 import PrintPreview from './PrintPreview.vue';
 import PoArrivalDevTools from './PoArrivalDevTools.vue';
@@ -97,29 +96,19 @@ function ensureAllocRow(rowId: number) {
 function addAllocRow(rowId: number) {
   if (frozenRows.value.has(rowId)) return;
   ensureAllocRow(rowId);
-  // 不让用户手动加 "剩余" 行 — 那一行始终是自动追加的最后一行。
-  const list = allocations[rowId];
-  // 把残留的 "剩余" 自动行抽出来
-  const residual = list.find(row => row.isResidual);
-  const realRows = list.filter(row => !row.isResidual);
-  realRows.push({ id: newLocalId(), planNumber: '', quantity: '', frozen: false, isResidual: false });
-  allocations[rowId] = residual ? [...realRows, residual] : realRows;
-  appendResidualIfNeeded(rowId);
+  allocations[rowId].push({ id: newLocalId(), planNumber: '', quantity: '', frozen: false, isResidual: false });
 }
 
 function removeAllocRow(rowId: number, index: number) {
   if (frozenRows.value.has(rowId)) return;
   const list = allocations[rowId];
-  // Cannot remove the auto-residual row either.
-  if (list[index]?.isResidual) return;
   list.splice(index, 1);
   if (list.length === 0) list.push({ id: newLocalId(), planNumber: '', quantity: '', frozen: false, isResidual: false });
-  appendResidualIfNeeded(rowId);
 }
 
 // 当前正在填的草稿总额（仅 non-residual + 有效值）。用于"本次剩余"实时显示。
 const parseTotalInDraft = (rowId: number) =>
-  (allocations[rowId] ?? []).filter(r => !r.isResidual).reduce((sum, r) => sum + parsePositiveInt(r.quantity), 0);
+  (allocations[rowId] ?? []).reduce((sum, r) => sum + parsePositiveInt(r.quantity), 0);
 
 // crypto.randomUUID 在 http（无 secure context）/ 老 PDA 浏览器 / 某些 webview 下不可用。
 // 后端 receipt id 由 server 返回，这里只是 key — 不需要 RFC UUID 严格性，Math.random 足够。
@@ -156,7 +145,7 @@ const remainingBudgetOf = (rowId: number) =>
   Math.max(0, orderQtyOf(rowId) - receivedQtyOf(rowId));
 
 const realAllocationsOf = (rowId: number): AllocDraft[] =>
-  (allocations[rowId] ?? []).filter(r => !r.isResidual);
+  allocations[rowId] ?? [];
 
 const allocatedOf = (rowId: number) =>
   realAllocationsOf(rowId).reduce((sum, row) => sum + parsePositiveInt(row.quantity), 0);
@@ -167,41 +156,11 @@ const remainingOf = (rowId: number) =>
 
 const overAllocated = (rowId: number) => remainingOf(rowId) < 0;
 
-// 剩余 > 0 时，确保列表末尾有一条自动"剩余"行（计划号空，quantity=剩余）；
-// 剩余 == 0 时移除任何残留的"剩余"行。
-function appendResidualIfNeeded(rowId: number) {
-  const list = allocations[rowId];
-  if (!list) return;
-  const residualIdx = list.findIndex(r => r.isResidual);
-  const rem = remainingOf(rowId);
-  if (rem > 0) {
-    if (residualIdx === -1) {
-      list.push({ id: newLocalId(), planNumber: '', quantity: String(rem), frozen: false, isResidual: true });
-    } else {
-      list[residualIdx].quantity = String(rem);
-    }
-  } else if (residualIdx !== -1) {
-    list.splice(residualIdx, 1);
-  }
-}
-
-// 当任何数量字段变化时，自动重算"剩余"行
-watch(
-  () => JSON.stringify(allocations),
-  () => {
-    for (const rowIdStr of Object.keys(allocations)) {
-      const rowId = Number(rowIdStr);
-      if (!frozenRows.value.has(rowId)) appendResidualIfNeeded(rowId);
-    }
-  },
-);
-
 // 校验。草稿总额不能超过剩余可拆（订单 - 已存累计）。
 const validSummaryFor = (rowId: number) => {
   const list = allocations[rowId] ?? [];
-  // 每条 "实际行" 都需要 planNumber + quantity > 0
-  const reals = list.filter(r => !r.isResidual);
-  const realValid = reals.every(r => r.planNumber.trim() !== '' && parsePositiveInt(r.quantity) > 0);
+  // 每条分配行都需要 planNumber + quantity > 0
+  const realValid = list.every(r => r.planNumber.trim() !== '' && parsePositiveInt(r.quantity) > 0);
   if (!realValid) return false;
   // 不能超过剩余可拆
   return parseTotalInDraft(rowId) <= remainingBudgetOf(rowId);
@@ -242,7 +201,6 @@ async function commitReceipts() {
     const flat: Allocation[] = [];
     for (const rowId of draftIds) {
       for (const row of allocations[rowId] ?? []) {
-        if (row.isResidual) continue;
         if (row.receiptId) continue; // 已 saved，跳过
         const plan = row.planNumber.trim();
         const qty = parsePositiveInt(row.quantity);
@@ -263,7 +221,6 @@ async function commitReceipts() {
     for (const rowId of draftIds) {
       const list = allocations[rowId] ?? [];
       for (const row of list) {
-        if (row.isResidual) continue;
         const key = `${rowId}|${row.planNumber.trim()}|${parsePositiveInt(row.quantity)}`;
         const id = idByKey.get(key);
         if (id) (row as AllocDraft & { receiptId?: string }).receiptId = id;
@@ -449,7 +406,7 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
           </div>
           <p class="detail-meta">{{ item.inventoryCode }} · {{ item.spec || '无规格' }}</p>
           <p class="detail-qty">
-              订单数量 <strong>{{ item.quantity }}</strong>
+              订单数量 <strong>{{ item.quantity }}</strong>{{ item.unitName ? ' ' + item.unitName : '' }}
               <span v-if="(item.receivedQuantity ?? 0) > 0" class="qty-received">已到货 {{ item.receivedQuantity }}</span>
               <span class="qty-remaining" :class="{ zero: remainingBudgetOf(item.rowId) === 0 }">可拆 {{ remainingBudgetOf(item.rowId) }}</span>
             </p>
@@ -485,10 +442,10 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
 
             <!-- 新可拆分配区（仅当 remainingBudgetOf > 0 且未全冻）-->
             <template v-if="remainingBudgetOf(item.rowId) > 0">
-              <div v-for="(row, idx) in allocations[item.rowId] ?? []" :key="`new-${row.id}`" class="alloc-row" :class="{ residual: row.isResidual }">
+              <div v-for="(row, idx) in allocations[item.rowId] ?? []" :key="`new-${row.id}`" class="alloc-row">
                 <Input
                   v-model="row.planNumber"
-                  :placeholder="row.isResidual ? '剩余（计划号可填）' : '计划号'"
+                  placeholder="计划号"
                   :disabled="submitting"
                   aria-label="生产计划号"
                   class="alloc-plan"
@@ -497,22 +454,21 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
                   v-model="row.quantity"
                   placeholder="数量"
                   type="number"
-                  :disabled="submitting || row.isResidual"
+                  :disabled="submitting"
                   aria-label="分配数量"
                   class="alloc-qty"
                 />
                 <Button
-                  v-if="!row.isResidual"
                   theme="light"
                   size="small"
                   variant="outline"
+                  class="alloc-remove"
                   :disabled="submitting"
-                  aria-label="删除分配行"
+                  aria-label="删除本行"
                   @click="removeAllocRow(item.rowId, idx)"
                 >
-                  <template #icon><CloseIcon aria-hidden="true" /></template>
+                  删除本行
                 </Button>
-                <span v-else class="alloc-tag">剩余</span>
               </div>
               <Button
                 theme="light"
@@ -670,16 +626,34 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
 }
 .alloc-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px 36px auto;
+  grid-template-columns: minmax(0, 1fr) 96px auto;
   gap: var(--td-spacer-1);
   align-items: center;
   margin-bottom: var(--td-spacer-1);
+  padding: var(--td-spacer-1);
+  background: var(--td-bg-color-secondarycontainer);
+  border: 1px dashed var(--td-component-stroke);
+  border-radius: var(--td-radius-default);
 }
 .alloc-row.historical {
   grid-template-columns: minmax(0, 1fr) 96px 36px;
 }
 .alloc-row :deep(.t-input) {
   min-width: 0;
+}
+.alloc-row :deep(.t-input__wrap) {
+  border: 1px solid var(--td-component-stroke);
+  border-radius: var(--td-radius-small);
+  background: var(--td-bg-color-container);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.alloc-row :deep(.t-input--focused .t-input__wrap) {
+  border-color: var(--td-brand-color);
+  box-shadow: 0 0 0 2px var(--td-brand-color-light);
+}
+.alloc-row :deep(.t-input__placeholder) {
+  color: var(--td-text-color-placeholder);
+  font-weight: 500;
 }
 .alloc-remaining {
   margin: var(--td-spacer-2) 0 0;
@@ -716,6 +690,15 @@ onUnmounted(() => { controller?.abort(); countRequest?.abort(); });
   padding: 0 var(--td-spacer-2);
   color: var(--td-warning-color);
   font-size: var(--td-font-size-body-small);
+}
+.alloc-remove {
+  color: var(--td-error-color);
+  border-color: var(--td-error-color-light);
+  white-space: nowrap;
+  padding: 0 var(--td-spacer-2);
+}
+.alloc-remove:not(:disabled):active {
+  background: var(--td-error-color-1);
 }
 .over-banner {
   margin: 0 0 var(--td-spacer-2);

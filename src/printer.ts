@@ -28,7 +28,7 @@ function apply(data: unknown) {
 }
 function receive(message: Message) {
   if (message.session !== session) return;
-  if (message.type === 'event') { if (message.event === 'printer.uploadProgress') window.dispatchEvent(new CustomEvent('wy-print-progress', { detail: message.data })); if (message.event?.startsWith('printer.')) apply(message.data); return; }
+  if (message.type === 'event') { if (message.event === 'printer.batchProgress') window.dispatchEvent(new CustomEvent('wy-print-progress', { detail: message.data })); if (message.event === 'visibility' && (message.data as { foreground?: boolean })?.foreground) window.dispatchEvent(new Event('wy-shell-foreground')); if (message.event?.startsWith('printer.')) apply(message.data); return; }
   if (message.type !== 'response') return;
   const task = message.id && pending.get(message.id);
   if (!task || !message.id) return;
@@ -48,8 +48,8 @@ function send(action: string, payload: object = {}) {
   return new Promise<unknown>((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error((action === 'printer.printTspl' || action === 'printer.uploadCommit') ? '发送结果未确认；Web 超时不会取消壳内操作，请核对出纸后再次打印' : '设备请求超时，请重试'));
-    }, action === 'printer.uploadCommit' ? 180_000 : action === 'printer.getStorage' ? 125_000 : action === 'printer.printTspl' || action === 'printer.listPaired' ? 60_000 : 15_000);
+      reject(new Error((action === 'printer.printTspl' || action.startsWith('printer.printBatch')) ? '发送结果未确认；Web 超时不会取消壳内操作，请核对出纸后再次打印' : '设备请求超时，请重试'));
+    }, action.startsWith('printer.printBatch') && action !== 'printer.printBatchCancel' ? 300_000 : action === 'printer.getStorage' ? 125_000 : action === 'printer.printTspl' || action === 'printer.listPaired' ? 60_000 : 15_000);
     pending.set(id, { resolve, reject, timer });
     try { sendingBridgeRequest = true; transport.send(envelope(action, payload, id)); }
     catch (error) { clearTimeout(timer); pending.delete(id); reject(error); }
@@ -96,48 +96,37 @@ export async function sendLabel(device: DeviceSnapshot, command: { dataBase64: s
   if (!response || !('result' in response) || response.deviceId?.toUpperCase() !== device.deviceId.toUpperCase()) throw new Error('打印响应无效，请核对出纸');
 }
 
-export async function sendLabels(device: DeviceSnapshot, commands: { dataBase64: string; initialization?: string }[], onBatch: (start: number, count: number, error?: Error) => void, onUpload?: (count: number) => void) {
-  for (let start = 0; start < commands.length;) {
-    let binary = '', initialization = '', end = start;
-    const boundaries: number[] = [];
-    while (end < commands.length) {
-      const command = commands[end]!;
-      const data = atob(command.dataBase64);
-      const prefix = command.initialization;
-      const next = prefix && prefix === initialization && data.startsWith(prefix) ? data.slice(prefix.length) : data;
-      if (binary.length + next.length > 3 * 1024 * 1024) break;
-      binary += next; boundaries.push(binary.length);
-      initialization = prefix && data.startsWith(prefix) ? prefix : '';
-      end++;
+export async function sendLabels(device: DeviceSnapshot, commands: { dataBase64: string }[], onProgress: (completed: number) => void) {
+  const started = await requestPrinter('printer.printBatchStart', device) as { jobId?: string; deviceId?: string };
+  if (!started?.jobId || started.deviceId?.toUpperCase() !== device.deviceId.toUpperCase()) throw new Error('打印批次响应无效，请核对出纸');
+  const jobId = started.jobId;
+  let completed = 0;
+  const progress = (event: Event) => {
+    const data = (event as CustomEvent<{ jobId?: string; completed?: number }>).detail;
+    if (data?.jobId === jobId && Number.isSafeInteger(data.completed) && data.completed! > completed && data.completed! <= commands.length) {
+      completed = data.completed!;
+      onProgress(completed);
     }
-    if (end === start) throw new Error('单张标签超过打印任务容量');
-    const jobId = `print-${Date.now()}-${++sequence}`;
-    let committed = false;
-    const report = (event: Event) => { const value = (event as CustomEvent).detail; if (value?.jobId === jobId && Number.isInteger(value.completed) && value.completed > 0 && value.completed <= end - start) onUpload?.(start + value.completed); };
-    window.addEventListener('wy-print-progress', report);
-    try {
-      if (end === start + 1 && !onUpload) await sendLabel(device, commands[start]!);
-      else {
-        const dataBase64 = btoa(binary);
-        for (let offset = 0, index = 0; offset < dataBase64.length; offset += 65536, index++) {
-          const response = await requestPrinter('printer.uploadAppend', {
-            ...(index === 0 ? { ...device, ...(onUpload ? { boundaries } : {}) } : {}), jobId, index, total: dataBase64.length,
-            dataBase64: dataBase64.slice(offset, offset + 65536),
-          }) as { received?: number };
-          if (response?.received !== Math.min(offset + 65536, dataBase64.length)) throw new Error('打印分块接收结果不一致');
-        }
-        committed = true;
-        const response = await requestPrinter('printer.uploadCommit', { jobId }, false) as { deviceId?: string; result?: unknown };
-        if (!response || !('result' in response) || response.deviceId?.toUpperCase() !== device.deviceId.toUpperCase()) throw new Error('打印响应无效，请核对出纸');
+  };
+  window.addEventListener('wy-print-progress', progress);
+  try {
+    for (const [index, command] of commands.entries()) {
+      checkCapacity({ ...device, ...command });
+      const appended = await requestPrinter('printer.printBatchAppend', { jobId, index, dataBase64: command.dataBase64 }) as { jobId?: string; index?: number; completed?: number };
+      if (appended?.jobId !== jobId || appended.index !== index) throw new Error('打印标签接收结果不一致，请核对出纸');
+      if (Number.isSafeInteger(appended.completed) && appended.completed! > completed && appended.completed! <= commands.length) {
+        completed = appended.completed!;
+        onProgress(completed);
       }
-      onBatch(start, end - start);
-    } catch (cause) {
-      const error = cause instanceof Error ? cause : new Error('发送异常');
-      onBatch(start, end - start, error);
-      if (!committed) await requestPrinter('printer.uploadCancel', { jobId }, false).catch(() => {});
-      throw error;
-    } finally { window.removeEventListener('wy-print-progress', report); }
-    start = end;
+    }
+    const committed = await requestPrinter('printer.printBatchCommit', { jobId }) as { jobId?: string; deviceId?: string; count?: number };
+    if (committed?.jobId !== jobId || committed.deviceId?.toUpperCase() !== device.deviceId.toUpperCase() || committed.count !== commands.length) throw new Error('打印批次结果未确认，请核对出纸');
+    if (completed < commands.length) onProgress(commands.length);
+  } catch (error) {
+    if (!(error instanceof Error && error.message.includes('Web 超时'))) await requestPrinter('printer.printBatchCancel', { jobId }, false).catch(() => {});
+    throw error;
+  } finally {
+    window.removeEventListener('wy-print-progress', progress);
   }
 }
 
