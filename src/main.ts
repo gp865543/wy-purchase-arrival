@@ -1,10 +1,10 @@
 import { createApp } from 'vue';
+import TDesign from 'tdesign-mobile-vue';
+
 import App from './App.vue';
+import router from './router';
+
 import 'tdesign-mobile-vue/es/style/index.css';
 import './style.css';
 
-// PDA H5 把当前 URL 路径（去掉 origin + query）传给 App，让它按 path 路由。
-// 例：/apps/purchase-arrival/putaway 走入库扫码。
-createApp(App, {
-  pathname: window.location.pathname,
-}).mount('#app');
+createApp(App).use(TDesign).use(router).mount('#app');

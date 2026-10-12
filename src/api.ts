@@ -351,3 +351,28 @@ export function getPutaway(putawayId: string, signal?: AbortSignal): Promise<Put
 export function cancelPutaway(putawayId: string): Promise<{ cancelled: string }> {
   return write(`/storage/putaway/${encodeURIComponent(putawayId)}`, 'DELETE', {});
 }
+// ----- 业务语义包装（与 wy-customer-material-receipt 同层级的视图接口） -----
+// 这些包装对外暴露 "listOrderMaterials / saveReceipt" 等动作名，
+// 让 Receipt.vue 不必关心后端是单条 POST 还是批量 createReceipts 的细节。
+
+/** 列出指定采购订单下的物料行（含 receipts 历史 + receivedQuantity） */
+export function listOrderMaterials(
+  poId: number,
+  signal: AbortSignal,
+): Promise<PurchaseOrderDetailRow[]> {
+  return getPurchaseOrder(poId, signal).then((result) => result.details);
+}
+
+/**
+ * 保存收货记录（按采购订单 + 行号 + 计划号 + 数量）。
+ * 后端是 createReceipts(poId, [allocation])，这里把 "一次保存一条" 简化为单条包装，
+ * 返回新 receipt（含 UUID）。
+ */
+export async function saveReceipt(
+  poId: number,
+  allocation: { rowId: number; planNumber: string; quantity: number },
+): Promise<Receipt> {
+  const result = await createReceipts(poId, [allocation]);
+  if (!result.receipts[0]) throw new Error('保存失败，未返回收货记录');
+  return result.receipts[0];
+}

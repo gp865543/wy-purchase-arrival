@@ -1,0 +1,85 @@
+/* 共享样式：与 wy-customer-material-receipt 的 receipt-prototype/pro.css 完全同构 */
+.template-page {
+  height: 100vh;
+  background: var(--td-bg-color-page);
+}
+
+.pda-screen {
+  display: flex;
+  flex-direction: column;
+  max-width: 480px;
+  height: 100%;
+  margin: auto;
+  background: var(--td-bg-color-page);
+  box-shadow: 0 0 0 1px var(--td-component-stroke);
+}
+
+.pda-content {
+  flex: 1;
+  min-height: 0;
+  padding: calc(env(safe-area-inset-top, 0px) + 36px) 16px calc(env(safe-area-inset-bottom, 0px) + 16px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.pda-card {
+  display: block;
+  margin: 12px 0;
+  padding: 12px 16px;
+  color: inherit;
+  text-decoration: none;
+  background: var(--td-bg-color-container);
+  border: 1px solid var(--td-component-border);
+  border-radius: var(--td-radius-large);
+}
+
+.pda-card.center {
+  text-align: center;
+}
+
+.plan-content h2 {
+  margin: 0 0 4px;
+  font-size: var(--td-font-size-title-medium);
+  color: var(--td-text-color-primary);
+}
+
+.plan-content h3 {
+  margin: 0 0 4px;
+  font-size: var(--td-font-size-title-small);
+  color: var(--td-text-color-primary);
+}
+
+.plan-content .muted {
+  color: var(--td-text-color-secondary);
+}
+
+.plan-content .error {
+  color: var(--td-error-color);
+}
+
+.plan-content .pda-card h2 .t-tag {
+  vertical-align: middle;
+}
+
+.plan-content .heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.plan-list .pda-card {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+.plan-list .pda-card h2,
+.plan-list .pda-card h3,
+.plan-list .pda-card p {
+  overflow-wrap: anywhere;
+}
+
+.plan-list .pda-card.received {
+  background: var(--td-success-color-light);
+}

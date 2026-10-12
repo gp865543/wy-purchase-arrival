@@ -1,24 +1,22 @@
 <script setup lang="ts">
-// PDA 首页集成：根据 URL path 路由到不同页面。
-//   - /apps/purchase-arrival/             → 采购到货清单（默认）
-//   - /apps/purchase-arrival/putaway...    → 采购入库（仓库员现场扫码收货标签落地货架）
+// 路由入口：
+//   - /apps/purchase-arrival/putaway  → StoragePutaway.vue（仓库入库扫码）
+//   - 其余路径                       → RouterView（List / Order / Receipt / Preview）
+// 切换逻辑保留 pathname 切片是因为 StoragePutaway 是独立的状态机页面，
+// 与订单/物料链路无关；其它一律走 vue-router。
+
 import { computed } from 'vue';
-import PurchaseOrderList from './views/PurchaseOrderList.vue';
+import { RouterView } from 'vue-router';
 import StoragePutaway from './views/StoragePutaway.vue';
 
-const props = defineProps<{
-  pathname?: string;
-}>();
-
-// 取 /apps/purchase-arrival/ 后面的 path 段（剥掉 query 与尾斜杠，避免 portal_entry 等
-// 把 activePage 撑成 "putaway?portal_entry=/pda" 导致模板 fallthrough）。
-const activePage = computed(() => {
-  const pathOnly = (props.pathname ?? '').split('?')[0] ?? '';
-  return pathOnly.replace(/^\/?apps\/purchase-arrival\/?/, '').replace(/\/$/, '');
+const isPutaway = computed(() => {
+  const path = window.location.pathname.split('?')[0] || '';
+  return path.replace(/\/$/, '').endsWith('/apps/purchase-arrival/putaway')
+    || path.endsWith('/apps/purchase-arrival/putaway');
 });
 </script>
 
 <template>
-  <StoragePutaway v-if="activePage.startsWith('putaway')" />
-  <PurchaseOrderList v-else />
+  <StoragePutaway v-if="isPutaway" />
+  <RouterView v-else :key="$route.path" />
 </template>
